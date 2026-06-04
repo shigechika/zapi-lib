@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zapi-lib"
+dynamic = ["version"]
+description = "Minimal Zabbix JSON-RPC API client (httpx-based)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "AIKAWA Shigechika"},
+]
+keywords = ["zabbix", "api", "json-rpc", "monitoring", "client"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    "httpx",
+]
+
+[project.urls]
+Homepage = "https://github.com/shigechika/zapi-lib"
+Repository = "https://github.com/shigechika/zapi-lib"
+Issues = "https://github.com/shigechika/zapi-lib/issues"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "respx",
+    "ruff",
+]
+
+[tool.setuptools]
+packages = ["zapi_lib"]
+
+[tool.setuptools.dynamic]
+version = {attr = "zapi_lib.__version__"}
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,74 @@
+name: release
+
+# Fires when release-please publishes the GitHub Release after its release PR is
+# merged. release-please creates the tag/Release via a PAT (see release-please.yml)
+# so the release.published event propagates here — the default GITHUB_TOKEN cannot
+# trigger downstream workflows. The released commit was already tested by ci.yml on
+# its way into main, so this pipeline only verifies, builds and publishes.
+on:
+  release:
+    types: [published]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Fail loudly if the version file disagrees with the tag (e.g. a hand-cut
+      # tag, or a release-please updater that silently missed the file) rather
+      # than shipping a mismatched version to PyPI.
+      - name: Verify version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          init=$(grep -E '^__version__' zapi_lib/__init__.py | cut -d'"' -f2)
+          echo "tag=$tag __init__=$init"
+          if [ "$init" != "$tag" ]; then
+            echo "::error::version mismatch (tag=$tag __init__=$init)"
+            exit 1
+          fi
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish:
+    needs: testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
