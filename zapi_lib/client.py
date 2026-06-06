@@ -422,8 +422,11 @@ class ZapiProvisioner(ZapiClient):
         self.default_location = location
         self.managed_tag = managed_tag
         super().__init__(url, user, password, timeout=timeout)
-        # Resolve (creating if needed) the default group once, after login.
-        self.group_id: str | None = self.ensure_group(group) if group else None
+        # Resolve the default group id (GET only — no write side effect at
+        # construction). It is created on demand when a host is first written
+        # (see _group_list), so a provisioner used only for reads / raw calls
+        # never creates a group just by being constructed.
+        self.group_id: str | None = self.get_group_id(group) if group else None
 
     @classmethod
     def from_config(
@@ -441,8 +444,14 @@ class ZapiProvisioner(ZapiClient):
         """
         cfg = configparser.ConfigParser(allow_no_value=True)
         cfg.read(path or _default_config_path())
-        user = cfg.get(section, "id", fallback=None) or cfg.get(section, "user")
-        password = cfg.get(section, "pw", fallback=None) or cfg.get(section, "password")
+        # Accept id/pw or the user/password aliases. Treat a blank value (the
+        # deploy-time placeholder: "認証情報は空欄で格納し、デプロイ時に記入") as
+        # missing and raise a clear auth error, rather than a configparser
+        # NoOptionError about an alias key the operator never wrote.
+        user = cfg.get(section, "id", fallback="") or cfg.get(section, "user", fallback="")
+        password = cfg.get(section, "pw", fallback="") or cfg.get(section, "password", fallback="")
+        if not user or not password:
+            raise ZapiAuthError(f"Zabbix credentials not set in [{section}]: fill in id/pw (or user/password)")
         return cls(
             cfg.get(section, "url"),
             user,
@@ -479,9 +488,15 @@ class ZapiProvisioner(ZapiClient):
         return tags
 
     def _group_list(self, group: str | None = None) -> list[dict]:
-        """Build the host group list: the default group plus an optional extra."""
+        """Build the host group list: the default group plus an optional extra.
+
+        The default group is created on demand here (not at construction), so a
+        provisioner used only for reads / raw calls has no write side effect.
+        """
         groups: list[dict] = []
-        if self.group_id is not None:
+        if self.default_group is not None:
+            if self.group_id is None:
+                self.group_id = self.ensure_group(self.default_group)
             groups.append({"groupid": self.group_id})
         if group is not None:
             groups.append({"groupid": self.ensure_group(group)})
@@ -501,7 +516,10 @@ class ZapiProvisioner(ZapiClient):
         device_type: str | None = None,
     ) -> list[str]:
         """Create a host in the default group (+ optional group), tagged managed-by."""
-        params: dict = {"host": host, "groups": self._group_list(group)}
+        groups = self._group_list(group)
+        if not groups:
+            raise ZapiError("no host group configured: set a [zabbix] group or pass group=")
+        params: dict = {"host": host, "groups": groups}
         tags = self._tags(location=location, tag_name=tag_name, tag_value=tag_value, device_type=device_type)
         if tags:
             params["tags"] = tags
@@ -525,7 +543,10 @@ class ZapiProvisioner(ZapiClient):
         a host's metadata in sync). Use :meth:`ZapiClient.set_host_tag` instead to
         upsert a single tag while preserving the others.
         """
-        params: dict = {"hostid": host_id, "groups": self._group_list(group)}
+        groups = self._group_list(group)
+        if not groups:
+            raise ZapiError("no host group configured: set a [zabbix] group or pass group=")
+        params: dict = {"hostid": host_id, "groups": groups}
         tags = self._tags(location=location, tag_name=tag_name, tag_value=tag_value, device_type=device_type)
         if tags:
             params["tags"] = tags
@@ -550,11 +571,13 @@ class ZapiProvisioner(ZapiClient):
         return sorted(result["itemids"])
 
     def update_item(self, item_id: str, *, value_type: int = 0) -> list[str]:
-        """Update a trapper item's value type, re-stamping the managed-by tag."""
-        params: dict = {"itemid": item_id, "value_type": value_type}
-        if self.managed_tag:
-            params["tags"] = [{"tag": self.managed_tag}]
-        result = self._call("item.update", params)
+        """Update a trapper item's value type. Tags are left untouched.
+
+        ``item.update`` replaces the whole tag set when ``tags`` is supplied, so
+        sending no tags preserves the managed-by tag (stamped at create time)
+        as well as any operator-added item tags.
+        """
+        result = self._call("item.update", {"itemid": item_id, "value_type": value_type})
         return sorted(result["itemids"])
 
     # ------------------------------------------------------------------

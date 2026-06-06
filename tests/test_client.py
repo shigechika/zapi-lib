@@ -461,6 +461,39 @@ def test_provisioner_resolves_default_group_on_init():
     with r:
         z = ZapiProvisioner("https://zabbix.example.com", "u", "p", group="Routers")
         assert z.group_id == "10"
+        # GET only at construction — never creates the group as a side effect.
+        assert not any(x["payload"]["method"] == "hostgroup.create" for x in r.captured)
+
+
+def test_provisioner_does_not_create_missing_group_at_construction():
+    """A missing default group is not created just by constructing (GET only)."""
+    r = make_router(results={"hostgroup.get": []})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", group="Missing")
+        assert z.group_id is None
+        assert not any(x["payload"]["method"] == "hostgroup.create" for x in r.captured)
+
+
+def test_create_host_lazily_creates_missing_default_group():
+    """The default group is created on demand at first host write, not at construction."""
+    r = make_router(
+        results={"hostgroup.get": [], "hostgroup.create": {"groupids": ["77"]}, "host.create": {"hostids": ["100"]}}
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", group="Missing")
+        assert z.group_id is None  # not created at construction
+        z.create_host("h1")
+        assert z.group_id == "77"  # created on demand, then cached
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "host.create")
+        assert call["params"]["groups"] == [{"groupid": "77"}]
+
+
+def test_create_host_raises_without_any_group():
+    """A group-less provisioner creating a host with no group= fails with a clear error."""
+    with make_router():
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")  # no default group
+        with pytest.raises(ZapiError, match="no host group"):
+            z.create_host("h1")
 
 
 def test_provisioner_no_group_leaves_group_id_none():
@@ -533,14 +566,15 @@ def test_create_item_without_tag_omits_tags():
         assert "tags" not in call["params"]
 
 
-def test_update_item_sets_value_type_and_tag():
+def test_update_item_sets_value_type_without_touching_tags():
+    """update_item changes value_type only; it must not replace the item's tag set."""
     r = make_router(results={"item.update": {"itemids": ["500"]}})
     with r:
         z = ZapiProvisioner("https://zabbix.example.com", "u", "p", managed_tag="nfdump")
         z.update_item("500", value_type=1)
         call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "item.update")
         assert call["params"]["value_type"] == 1
-        assert call["params"]["tags"] == [{"tag": "nfdump"}]
+        assert "tags" not in call["params"]  # tags preserved (item.update replaces the whole set)
 
 
 def test_set_maintenance_creates_with_name_period_and_hosts():
@@ -604,3 +638,23 @@ def test_from_config_accepts_user_password_aliases(tmp_path):
     with make_router():
         z = ZapiProvisioner.from_config(path=str(cfg))
         assert z.group_id is None  # no group configured
+
+
+def test_from_config_blank_credentials_raise_auth_error(tmp_path):
+    """Blank id/pw (the deploy placeholder) raises a clear ZapiAuthError, not NoOptionError."""
+    cfg = tmp_path / "config.ini"
+    cfg.write_text("[zabbix]\nurl = https://zabbix.example.com\nid =\npw =\n")
+    # Raised before any network call, so no router is needed.
+    with pytest.raises(ZapiAuthError, match="credentials not set"):
+        ZapiProvisioner.from_config(path=str(cfg))
+
+
+def test_call_auth_false_omits_token_after_login():
+    """call(auth=False) omits the session token even after a token exists (legacy auth field)."""
+    r = make_router()
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")  # token is now set
+        c.call("apiinfo.version", {}, auth=False)
+        last = r.captured[-1]
+        assert "auth" not in last["payload"]
+        assert "authorization" not in {k.lower() for k in last["headers"]}
