@@ -16,11 +16,18 @@ DEFAULT_RESULTS: dict[str, object] = {
     "apiinfo.version": "6.0.0",
     "user.login": "sess-token-abc",
     "hostgroup.get": [{"groupid": "10"}],
+    "hostgroup.create": {"groupids": ["10"]},
     "host.get": [],
+    "host.create": {"hostids": ["100"]},
+    "host.update": {"hostids": ["100"]},
     "item.get": [],
+    "item.create": {"itemids": ["200"]},
+    "item.update": {"itemids": ["200"]},
     "problem.get": [],
     "event.get": [],
     "event.acknowledge": {"eventids": ["1"]},
+    "maintenance.get": [],
+    "maintenance.create": {"maintenanceids": ["900"]},
 }
 
 

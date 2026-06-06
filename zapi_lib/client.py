@@ -7,9 +7,18 @@ degrades to the proven ``user`` + ``auth``-field path used by older Zabbix
 forward-compatible with 6.4 / 7.0 (``username`` + ``Authorization: Bearer``).
 """
 
+import configparser
+import logging
+import os
+import time
+from datetime import datetime
+
 import httpx
 
 DEFAULT_TIMEOUT = 30
+DEFAULT_CONFIG_SECTION = "zabbix"
+
+_logger = logging.getLogger(__name__)
 
 # Zabbix tag-filter operators (host.get / problem.get / event.get)
 TAG_OP_EQUAL = "1"
@@ -314,3 +323,280 @@ class ZapiClient:
         if message:
             params["message"] = message
         return self._call("event.acknowledge", params)
+
+    # ------------------------------------------------------------------
+    # Generic call (escape hatch for methods without a dedicated helper)
+    # ------------------------------------------------------------------
+    def call(self, method: str, params: dict, *, auth: bool = True) -> object:
+        """Invoke any Zabbix JSON-RPC method directly.
+
+        A thin public wrapper over the internal dispatcher for callers that need
+        a method this client does not wrap. ``auth=False`` omits the session
+        token (only ``apiinfo.version`` / ``user.login`` need that).
+        """
+        return self._call(method, params, auth=auth)
+
+    # ------------------------------------------------------------------
+    # Host groups (write)
+    # ------------------------------------------------------------------
+    def get_group_id(self, name: str) -> str | None:
+        """Return the id of a host group by exact name, or None when absent."""
+        result = self._call("hostgroup.get", {"output": "groupid", "filter": {"name": [name]}})
+        return result[0]["groupid"] if result else None
+
+    def create_group(self, name: str) -> str:
+        """Create a host group and return its id."""
+        result = self._call("hostgroup.create", {"name": name})
+        return result["groupids"][0]
+
+    def ensure_group(self, name: str) -> str:
+        """Return a host group's id, creating the group when it does not exist."""
+        return self.get_group_id(name) or self.create_group(name)
+
+    # ------------------------------------------------------------------
+    # Host / item id lookups
+    # ------------------------------------------------------------------
+    def get_host_ids(self, host: str) -> list[str]:
+        """Return sorted host ids for an exact host (technical name)."""
+        result = self._call("host.get", {"filter": {"host": host}, "output": "hostid"})
+        return sorted(r["hostid"] for r in result)
+
+    def get_host_ids_by_tag(self, tag: str, value: str | None = None) -> list[str]:
+        """Return sorted host ids matching a tag (Equal when a value is given)."""
+        result = self._call("host.get", {"output": "hostid", "tags": [tag_filter(tag, value)]})
+        return sorted(r["hostid"] for r in result)
+
+    def get_item_ids(self, host_id: str, name: str) -> list[str]:
+        """Return sorted item ids on a host matching an exact item name."""
+        result = self._call("item.get", {"hostids": host_id, "filter": {"name": name}, "output": "itemid"})
+        return sorted(r["itemid"] for r in result)
+
+
+def _default_config_path() -> str:
+    """Resolve the default config path: ``./config.ini`` then ``~/.config.ini``."""
+    cwd = os.path.join(os.getcwd(), "config.ini")
+    if os.path.isfile(cwd):
+        return cwd
+    return os.path.join(os.path.expanduser("~"), ".config.ini")
+
+
+class ZapiProvisioner(ZapiClient):
+    """Config-driven Zabbix provisioning client.
+
+    Extends :class:`ZapiClient` with the pattern metric-collection scripts use:
+    read connection and provisioning defaults from a ``config.ini`` ``[zabbix]``
+    section, then auto-create Zabbix *trapper* hosts and items stamped with a
+    managed-by marker tag so the collector can push values to them.
+
+    The ``[zabbix]`` section is read as::
+
+        [zabbix]
+        url      = https://zabbix.example.com/api_jsonrpc.php
+        id       = api-user        ; or `user`
+        pw       = api-pass        ; or `password`
+        group    = DefaultGroup    ; default host group for created/updated hosts
+        location = tokyo           ; optional; added as a `location` tag
+        tag      = my-collector    ; optional; managed-by marker tag on hosts/items
+
+    ``url`` and the credentials are required; ``group``/``location``/``tag`` are
+    optional. ``group``, when set, is resolved (and created if missing) once at
+    construction and applied to every host created or updated through this client.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        user: str,
+        password: str,
+        *,
+        group: str | None = None,
+        location: str | None = None,
+        managed_tag: str | None = None,
+        logger: logging.Logger | None = None,
+        timeout: int = DEFAULT_TIMEOUT,
+    ):
+        # Set provisioning state before super().__init__ touches the network, so
+        # the instance is fully formed even if login raises during construction.
+        self.logger = logger or _logger
+        self.default_group = group
+        self.default_location = location
+        self.managed_tag = managed_tag
+        super().__init__(url, user, password, timeout=timeout)
+        # Resolve (creating if needed) the default group once, after login.
+        self.group_id: str | None = self.ensure_group(group) if group else None
+
+    @classmethod
+    def from_config(
+        cls,
+        path: str | None = None,
+        *,
+        section: str = DEFAULT_CONFIG_SECTION,
+        logger: logging.Logger | None = None,
+        timeout: int = DEFAULT_TIMEOUT,
+    ) -> "ZapiProvisioner":
+        """Build a provisioner from a ``config.ini`` ``[zabbix]`` section.
+
+        ``path`` defaults to ``./config.ini`` then ``~/.config.ini``. Credentials
+        accept either ``id``/``pw`` or the ``user``/``password`` aliases.
+        """
+        cfg = configparser.ConfigParser(allow_no_value=True)
+        cfg.read(path or _default_config_path())
+        user = cfg.get(section, "id", fallback=None) or cfg.get(section, "user")
+        password = cfg.get(section, "pw", fallback=None) or cfg.get(section, "password")
+        return cls(
+            cfg.get(section, "url"),
+            user,
+            password,
+            group=cfg.get(section, "group", fallback=None),
+            location=cfg.get(section, "location", fallback=None),
+            managed_tag=cfg.get(section, "tag", fallback=None),
+            logger=logger,
+            timeout=timeout,
+        )
+
+    # ------------------------------------------------------------------
+    # Convention builders
+    # ------------------------------------------------------------------
+    def _tags(
+        self,
+        *,
+        location: str | None = None,
+        tag_name: str | None = None,
+        tag_value: str | None = None,
+        device_type: str | None = None,
+    ) -> list[dict]:
+        """Build the host/item tag set: managed-by marker + optional location etc."""
+        tags: list[dict] = []
+        if self.managed_tag:
+            tags.append({"tag": self.managed_tag})
+        loc = location if location is not None else self.default_location
+        if loc is not None:
+            tags.append({"tag": "location", "value": loc})
+        if tag_name is not None:
+            tags.append({"tag": tag_name, "value": tag_value or ""})
+        if device_type is not None:
+            tags.append({"tag": "device_type", "value": device_type})
+        return tags
+
+    def _group_list(self, group: str | None = None) -> list[dict]:
+        """Build the host group list: the default group plus an optional extra."""
+        groups: list[dict] = []
+        if self.group_id is not None:
+            groups.append({"groupid": self.group_id})
+        if group is not None:
+            groups.append({"groupid": self.ensure_group(group)})
+        return groups
+
+    # ------------------------------------------------------------------
+    # Hosts (write)
+    # ------------------------------------------------------------------
+    def create_host(
+        self,
+        host: str,
+        *,
+        group: str | None = None,
+        location: str | None = None,
+        tag_name: str | None = None,
+        tag_value: str | None = None,
+        device_type: str | None = None,
+    ) -> list[str]:
+        """Create a host in the default group (+ optional group), tagged managed-by."""
+        params: dict = {"host": host, "groups": self._group_list(group)}
+        tags = self._tags(location=location, tag_name=tag_name, tag_value=tag_value, device_type=device_type)
+        if tags:
+            params["tags"] = tags
+        result = self._call("host.create", params)
+        return sorted(result["hostids"])
+
+    def update_host(
+        self,
+        host_id: str,
+        *,
+        group: str | None = None,
+        location: str | None = None,
+        tag_name: str | None = None,
+        tag_value: str | None = None,
+        device_type: str | None = None,
+    ) -> list[str]:
+        """Update a host's groups and managed-by tags.
+
+        Like Zabbix ``host.update``, the supplied groups and tags *replace* the
+        host's existing sets (this is the behaviour the collectors rely on to keep
+        a host's metadata in sync). Use :meth:`ZapiClient.set_host_tag` instead to
+        upsert a single tag while preserving the others.
+        """
+        params: dict = {"hostid": host_id, "groups": self._group_list(group)}
+        tags = self._tags(location=location, tag_name=tag_name, tag_value=tag_value, device_type=device_type)
+        if tags:
+            params["tags"] = tags
+        result = self._call("host.update", params)
+        return sorted(result["hostids"])
+
+    # ------------------------------------------------------------------
+    # Items (write)
+    # ------------------------------------------------------------------
+    def create_item(self, host_id: str, name: str, *, value_type: int = 0) -> list[str]:
+        """Create a Zabbix trapper item (``key_`` == ``name``), tagged managed-by."""
+        params: dict = {
+            "hostid": host_id,
+            "name": name,
+            "key_": name,
+            "type": 2,  # Zabbix trapper
+            "value_type": value_type,
+        }
+        if self.managed_tag:
+            params["tags"] = [{"tag": self.managed_tag}]
+        result = self._call("item.create", params)
+        return sorted(result["itemids"])
+
+    def update_item(self, item_id: str, *, value_type: int = 0) -> list[str]:
+        """Update a trapper item's value type, re-stamping the managed-by tag."""
+        params: dict = {"itemid": item_id, "value_type": value_type}
+        if self.managed_tag:
+            params["tags"] = [{"tag": self.managed_tag}]
+        result = self._call("item.update", params)
+        return sorted(result["itemids"])
+
+    # ------------------------------------------------------------------
+    # Maintenance
+    # ------------------------------------------------------------------
+    def set_maintenance(self, location: str, since: str, till: str, name: str, description: str) -> list[str]:
+        """Create a maintenance window covering hosts with a matching ``location`` tag.
+
+        ``since``/``till`` are ``"%Y/%m/%d %H:%M:%S"`` strings. The window name is
+        ``name`` + the start time (``%y%m%d%H%M``); an existing window with that
+        name is left untouched (idempotent) and its ids are returned.
+        """
+        since_dt = datetime.strptime(since, "%Y/%m/%d %H:%M:%S")
+        till_dt = datetime.strptime(till, "%Y/%m/%d %H:%M:%S")
+        maint_name = name + since_dt.strftime("%y%m%d%H%M")
+
+        existing = self._call("maintenance.get", {"filter": {"name": maint_name}, "output": ["maintenanceid"]})
+        if existing:
+            self.logger.info("maintenance already exists, skipping: %s", maint_name)
+            return [e["maintenanceid"] for e in existing]
+
+        result = self._call(
+            "maintenance.create",
+            {
+                "active_since": int(time.mktime(since_dt.timetuple())),
+                "active_till": int(time.mktime(till_dt.timetuple())),
+                "name": maint_name,
+                "description": description,
+                "tags_evaltype": 0,
+                "hostids": self.get_host_ids_by_tag("location", location),
+                "timeperiods": [
+                    {
+                        "start_date": int(time.mktime(since_dt.timetuple())),
+                        "period": int((till_dt - since_dt).total_seconds()),
+                    }
+                ],
+                "tags": [{"tag": "location", "operator": "0", "value": location}],
+            },
+        )
+        return result["maintenanceids"]
+
+    def show_version(self) -> str:
+        """Log and return the Zabbix API version detected at construction."""
+        self.logger.info("Zabbix API version: %s", self.version)
+        return self.version

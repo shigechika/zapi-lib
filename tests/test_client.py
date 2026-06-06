@@ -7,7 +7,7 @@ import pytest
 import respx
 
 from tests.conftest import ENDPOINT, SAMPLE_HOST, SAMPLE_ITEM, SAMPLE_PROBLEM, make_router
-from zapi_lib.client import ZapiAuthError, ZapiClient, ZapiError, tag_filter
+from zapi_lib.client import ZapiAuthError, ZapiClient, ZapiError, ZapiProvisioner, tag_filter
 
 # ---- URL normalization ----------------------------------------------------
 
@@ -381,3 +381,226 @@ def test_init_closes_http_client_on_failure(monkeypatch):
         with pytest.raises(ZapiAuthError):
             ZapiClient("https://zabbix.example.com", "u", "bad")
     assert closed["n"] >= 1  # closed on failed init, not leaked
+
+
+# ---- ZapiClient write primitives ------------------------------------------
+
+
+def test_get_group_id_found():
+    r = make_router(results={"hostgroup.get": [{"groupid": "42"}]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.get_group_id("Routers") == "42"
+
+
+def test_get_group_id_absent_returns_none():
+    r = make_router(results={"hostgroup.get": []})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.get_group_id("Nope") is None
+
+
+def test_ensure_group_creates_when_missing():
+    r = make_router(results={"hostgroup.get": [], "hostgroup.create": {"groupids": ["77"]}})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.ensure_group("New") == "77"
+        assert any(x["payload"]["method"] == "hostgroup.create" for x in r.captured)
+
+
+def test_ensure_group_reuses_existing():
+    r = make_router(results={"hostgroup.get": [{"groupid": "42"}]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.ensure_group("Routers") == "42"
+        assert not any(x["payload"]["method"] == "hostgroup.create" for x in r.captured)
+
+
+def test_get_host_ids_sorted_by_exact_host():
+    r = make_router(results={"host.get": [{"hostid": "2"}, {"hostid": "1"}]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.get_host_ids("router1") == ["1", "2"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "host.get")
+        assert call["params"]["filter"] == {"host": "router1"}
+
+
+def test_get_host_ids_by_tag_uses_equal_operator():
+    r = make_router(results={"host.get": [{"hostid": "5"}]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.get_host_ids_by_tag("location", "tokyo") == ["5"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "host.get")
+        assert call["params"]["tags"] == [{"tag": "location", "value": "tokyo", "operator": "1"}]
+
+
+def test_get_item_ids_filters_by_name():
+    r = make_router(results={"item.get": [{"itemid": "300"}, {"itemid": "200"}]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.get_item_ids("10", "usage") == ["200", "300"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "item.get")
+        assert call["params"] == {"hostids": "10", "filter": {"name": "usage"}, "output": "itemid"}
+
+
+def test_call_passthrough_carries_params_and_auth():
+    r = make_router(results={"foo.bar": {"ok": 1}})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.call("foo.bar", {"k": "v"}) == {"ok": 1}
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "foo.bar")
+        assert call["params"] == {"k": "v"}
+        assert call["auth"] == "sess-token-abc"  # default 6.0 → token in the `auth` field
+
+
+# ---- ZapiProvisioner ------------------------------------------------------
+
+
+def test_provisioner_resolves_default_group_on_init():
+    r = make_router(results={"hostgroup.get": [{"groupid": "10"}]})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", group="Routers")
+        assert z.group_id == "10"
+
+
+def test_provisioner_no_group_leaves_group_id_none():
+    with make_router():
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        assert z.group_id is None
+
+
+def test_create_host_includes_default_group_and_managed_tags():
+    r = make_router(results={"hostgroup.get": [{"groupid": "10"}], "host.create": {"hostids": ["100"]}})
+    with r:
+        z = ZapiProvisioner(
+            "https://zabbix.example.com", "u", "p", group="Routers", location="tokyo", managed_tag="nfdump"
+        )
+        assert z.create_host("h1") == ["100"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "host.create")
+        assert {"groupid": "10"} in call["params"]["groups"]
+        assert {"tag": "nfdump"} in call["params"]["tags"]
+        assert {"tag": "location", "value": "tokyo"} in call["params"]["tags"]
+
+
+def test_create_host_appends_extra_group():
+    r = make_router(results={"hostgroup.get": [{"groupid": "10"}], "host.create": {"hostids": ["100"]}})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", group="Default")
+        z.create_host("h1", group="Extra")
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "host.create")
+        assert len(call["params"]["groups"]) == 2  # default + extra
+
+
+def test_create_host_without_tag_or_location_omits_tags():
+    r = make_router(results={"hostgroup.get": [{"groupid": "10"}], "host.create": {"hostids": ["100"]}})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", group="Routers")
+        z.create_host("h1")
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "host.create")
+        assert "tags" not in call["params"]
+
+
+def test_update_host_replaces_groups_and_tags():
+    r = make_router(results={"hostgroup.get": [{"groupid": "10"}], "host.update": {"hostids": ["10"]}})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", group="Routers", managed_tag="nfdump")
+        z.update_host("10", location="osaka", device_type="switch")
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "host.update")
+        assert call["params"]["hostid"] == "10"
+        assert {"tag": "nfdump"} in call["params"]["tags"]
+        assert {"tag": "location", "value": "osaka"} in call["params"]["tags"]  # arg overrides default
+        assert {"tag": "device_type", "value": "switch"} in call["params"]["tags"]
+
+
+def test_create_item_is_trapper_with_managed_tag():
+    r = make_router(results={"item.create": {"itemids": ["500"]}})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", managed_tag="nfdump")
+        assert z.create_item("10", "usage", value_type=3) == ["500"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "item.create")
+        assert call["params"]["type"] == 2  # Zabbix trapper
+        assert call["params"]["key_"] == "usage"
+        assert call["params"]["value_type"] == 3
+        assert call["params"]["tags"] == [{"tag": "nfdump"}]
+
+
+def test_create_item_without_tag_omits_tags():
+    r = make_router(results={"item.create": {"itemids": ["500"]}})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        z.create_item("10", "usage")
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "item.create")
+        assert "tags" not in call["params"]
+
+
+def test_update_item_sets_value_type_and_tag():
+    r = make_router(results={"item.update": {"itemids": ["500"]}})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", managed_tag="nfdump")
+        z.update_item("500", value_type=1)
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "item.update")
+        assert call["params"]["value_type"] == 1
+        assert call["params"]["tags"] == [{"tag": "nfdump"}]
+
+
+def test_set_maintenance_creates_with_name_period_and_hosts():
+    r = make_router(
+        results={
+            "maintenance.get": [],
+            "maintenance.create": {"maintenanceids": ["999"]},
+            "host.get": [{"hostid": "1"}, {"hostid": "2"}],
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance("tokyo", "2025/03/15 09:30:00", "2025/03/15 11:30:00", "MW-", "desc")
+        assert result == ["999"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.create")
+        assert call["params"]["name"] == "MW-2503150930"  # name + start %y%m%d%H%M
+        assert call["params"]["timeperiods"][0]["period"] == 7200  # 2h in seconds
+        assert call["params"]["tags"] == [{"tag": "location", "operator": "0", "value": "tokyo"}]
+        assert call["params"]["hostids"] == ["1", "2"]
+
+
+def test_set_maintenance_is_idempotent_when_window_exists():
+    r = make_router(results={"maintenance.get": [{"maintenanceid": "555"}]})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
+        assert result == ["555"]
+        assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
+
+
+def test_provisioner_show_version_returns_detected_version():
+    r = make_router(version="6.0.42")
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        assert z.show_version() == "6.0.42"
+
+
+def test_from_config_reads_zabbix_section(tmp_path):
+    cfg = tmp_path / "config.ini"
+    cfg.write_text(
+        "[zabbix]\n"
+        "url = https://zabbix.example.com/api_jsonrpc.php\n"
+        "id = u\n"
+        "pw = p\n"
+        "group = Routers\n"
+        "location = tokyo\n"
+        "tag = my-collector\n"
+    )
+    r = make_router(results={"hostgroup.get": [{"groupid": "10"}]})
+    with r:
+        z = ZapiProvisioner.from_config(path=str(cfg))
+        assert z._url == "https://zabbix.example.com/api_jsonrpc.php"
+        assert z.default_location == "tokyo"
+        assert z.managed_tag == "my-collector"
+        assert z.group_id == "10"
+
+
+def test_from_config_accepts_user_password_aliases(tmp_path):
+    cfg = tmp_path / "config.ini"
+    cfg.write_text("[zabbix]\nurl = https://zabbix.example.com\nuser = u\npassword = p\n")
+    with make_router():
+        z = ZapiProvisioner.from_config(path=str(cfg))
+        assert z.group_id is None  # no group configured
