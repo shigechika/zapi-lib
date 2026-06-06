@@ -399,8 +399,9 @@ class ZapiProvisioner(ZapiClient):
         tag      = my-collector    ; optional; managed-by marker tag on hosts/items
 
     ``url`` and the credentials are required; ``group``/``location``/``tag`` are
-    optional. ``group``, when set, is resolved (and created if missing) once at
-    construction and applied to every host created or updated through this client.
+    optional. The default ``group``, when set, is looked up at construction (no
+    write) and created on demand the first time a host is created or updated, so
+    a provisioner used only for reads or raw :meth:`call` has no write side effect.
     """
 
     def __init__(
