@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/shigechika/zapi-lib/compare/v0.2.0...v0.3.0) (2026-06-06)
+
+
+### Features
+
+* add ZapiProvisioner and config-driven write helpers ([#2](https://github.com/shigechika/zapi-lib/issues/2)) ([ea0eb0b](https://github.com/shigechika/zapi-lib/commit/ea0eb0bc48c9791b51703c8c285b6f6b432c7682))
+
 ## [0.2.0](https://github.com/shigechika/zapi-lib/compare/v0.1.0...v0.2.0) (2026-06-04)
 
 
