@@ -62,11 +62,13 @@ other raw exception escape a public method instead of going through
 for a non-numeric `countOutput` result). This contract change would
 silently break every consumer's `except ZapiError` handling.
 
-## 3. `ZapiProvisioner` write paths: idempotency and partial failure
+## 3. Write paths: idempotency, partial failure, and safe defaults
 
 `ZapiProvisioner` creates/updates real Zabbix objects (hosts, items,
-maintenance windows), a higher-stakes surface than the read-only
-`ZapiClient` methods:
+maintenance windows), the higher-stakes surface — but `ZapiClient` is not
+purely read-only either: `set_host_tag`, `acknowledge_problem`, and the
+`create_group`/`ensure_group` group-creation path (all defined on
+`ZapiClient`) also write. Review both:
 
 - `ensure_group` / `_group_list` and `set_maintenance` are check-then-create
   (read for an existing group/window by name, create only if absent) —
@@ -81,15 +83,31 @@ maintenance windows), a higher-stakes surface than the read-only
   because it's transactional. Don't let a new provisioner method add a
   *non*-idempotent step ahead of a write (e.g. something that would double
   up on retry) without calling it out.
-- `update_item` (and `ZapiClient.set_host_tag`) intentionally omit `tags`
-  from the JSON-RPC call to *preserve* existing tags, because Zabbix's
-  `*.update` replaces the entire tag set whenever `tags` is present at all
-  — even an empty list. `update_host`'s documented purpose is the opposite
-  (replace the host's groups/tags with what's passed in), but it uses the
-  same `if tags:` guard to avoid sending an explicit empty replacement. A
-  diff that adds `tags: []` "for clarity" to any of these would silently
-  wipe existing tags on `update_item`/`set_host_tag`, or no-op instead of
-  clearing tags on `update_host` — flag either.
+- Two different strategies keep `*.update` from wiping tags, and they are
+  **opposites** — don't conflate them. `update_item` preserves tags by
+  *never sending* a `tags` key (it calls `item.update` with only
+  `itemid`/`value_type` — no guard); `update_host` sends `tags` only via an
+  `if tags:` guard, i.e. it omits the key when the computed tag list is empty
+  rather than sending an empty one (its documented purpose is otherwise to
+  *replace* the host's tags). Adding an unconditional `tags: []` to either
+  would silently wipe existing tags, because Zabbix's `*.update` replaces the
+  entire tag set whenever `tags` is present at all — even `[]`. But
+  `ZapiClient.set_host_tag` does the reverse: it *always* sends a
+  fully-rebuilt, non-empty `tags` list — fetch the host's current tags, drop
+  the same-named one, re-append the upsert — so its sent list is never empty
+  and the "omit tags" reasoning does not apply to it. When
+  rebuilding, it re-sends only the writable `{tag, value}` keys, deliberately
+  stripping Zabbix 6.4+'s read-only `automatic` field that `host.get` returns
+  but `host.update` rejects. A "simplification" that passes the fetched tags
+  straight through to `host.update`, or that converts `set_host_tag` to the
+  omit-`tags` pattern, is a bug — flag it.
+- `acknowledge_problem` builds its action bitmask as `2 | (4 if message)` —
+  acknowledge, plus add-message only when the message is non-empty (Zabbix
+  rejects an empty message when bit 4 is set). It deliberately never sets the
+  close bit (1), so it can acknowledge/comment but never *close* a problem
+  (safe even when triggers disallow manual close; `zapi-mcp` exposes it as an
+  MCP tool). A diff that ORs in the close bit silently turns a safe write into
+  a destructive one — flag it.
 
 ## 4. Credentials handling
 
@@ -104,6 +122,15 @@ maintenance windows), a higher-stakes surface than the read-only
   entries via `httpx`, never string-concatenated into a URL or raw query.
   Flag a new code path that builds a request by string concatenation
   instead of adding to the `params` dict.
+- `_login` retries with the alternate param name (`user` ↔ `username`) only
+  when the first failure does *not* look like a credential error — it
+  substring-matches `"incorrect"`/`"password"`/`"no permissions"` and
+  re-raises those without a second attempt, so a genuine bad password costs
+  exactly one login (no doubled lockout / audit pressure). A diff that
+  removes or reorders this guard, or broadens the retry to every
+  `ZapiAuthError`, doubles failed-login attempts against production Zabbix —
+  flag it. (The substring match is also brittle across Zabbix
+  versions/locales; changes to it warrant scrutiny.)
 
 ## 5. Test conventions
 
