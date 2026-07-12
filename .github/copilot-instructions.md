@@ -84,16 +84,18 @@ purely read-only either: `set_host_tag`, `acknowledge_problem`, and the
   *non*-idempotent step ahead of a write (e.g. something that would double
   up on retry) without calling it out.
 - Two different strategies keep `*.update` from wiping tags, and they are
-  **opposites** — don't conflate them. `update_item` (and `update_host`)
-  preserve tags by *omitting* the `tags` key, guarded by `if tags:`, because
-  Zabbix's `*.update` replaces the entire tag set whenever `tags` is present
-  at all — even `[]` — so adding an unconditional `tags: []` will clear/wipe
-  existing tags. Conversely, the current `if tags:` guard means `update_host`
-  cannot clear tags when no tags are provided. But `ZapiClient.set_host_tag`
-  does the reverse: it *always* sends a fully-rebuilt, non-empty `tags`
-  list — fetch the host's current
-  tags, drop the same-named one, re-append the upsert — so its sent list is
-  never empty and the "omit tags" reasoning does not apply to it. When
+  **opposites** — don't conflate them. `update_item` preserves tags by
+  *never sending* a `tags` key (it calls `item.update` with only
+  `itemid`/`value_type` — no guard); `update_host` sends `tags` only via an
+  `if tags:` guard, i.e. it omits the key when the computed tag list is empty
+  rather than sending an empty one (its documented purpose is otherwise to
+  *replace* the host's tags). Adding an unconditional `tags: []` to either
+  would silently wipe existing tags, because Zabbix's `*.update` replaces the
+  entire tag set whenever `tags` is present at all — even `[]`. But
+  `ZapiClient.set_host_tag` does the reverse: it *always* sends a
+  fully-rebuilt, non-empty `tags` list — fetch the host's current tags, drop
+  the same-named one, re-append the upsert — so its sent list is never empty
+  and the "omit tags" reasoning does not apply to it. When
   rebuilding, it re-sends only the writable `{tag, value}` keys, deliberately
   stripping Zabbix 6.4+'s read-only `automatic` field that `host.get` returns
   but `host.update` rejects. A "simplification" that passes the fetched tags
