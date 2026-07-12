@@ -22,15 +22,24 @@ no stdio/transport concerns, just an importable package.
 - `zapi_lib/client.py` — the whole library lives in one module:
   - `ZapiClient` — version-adaptive login (`user`+`auth` field for Zabbix
     <=6.2, `username`+`Authorization: Bearer` for 6.4/7.0, degrading to the
-    other param name on error), read helpers (`get_hosts`, `get_items`,
-    `get_problems`, `count_problems`, `get_events`), write helpers
-    (`set_host_tag`, `acknowledge_problem`), and `call()` as an escape hatch
-    for JSON-RPC methods without a dedicated wrapper.
+    other param name only when the first failure is *not* a credential
+    error — a genuine bad password is never retried, to avoid doubling
+    lockout/audit pressure). Read helpers (`get_hosts`, `get_items`,
+    `get_problems`, `count_problems`, `get_events`, `get_group_id`,
+    `get_host_ids`/`get_host_ids_by_tag`/`get_item_ids`); write helpers
+    (`set_host_tag`, `acknowledge_problem`, and the group-creation path
+    `create_group`/`ensure_group`); and `call()` as an escape hatch for
+    JSON-RPC methods without a dedicated wrapper. Construction itself hits
+    the network (`apiinfo.version` + `user.login`) and closes the httpx
+    client if that raises (since `__enter__`/`__exit__` never run for a
+    failed constructor).
   - `ZapiProvisioner(ZapiClient)` — config-driven (`config.ini` `[zabbix]`
     section via `from_config`) provisioning: `create_host`/`update_host`/
-    `create_item`/`update_item`/`set_maintenance`, `ensure_group`,
-    `get_host_ids`/`get_item_ids`. Auto-creates trapper hosts/items tagged
-    with a managed-by marker.
+    `create_item`/`update_item`/`set_maintenance` (the group/id helpers
+    above are inherited from `ZapiClient`, not defined here). Auto-creates
+    trapper hosts/items tagged with a managed-by marker; the default group
+    is resolved read-only at construction and created lazily on the first
+    host write, so constructing a provisioner has no write side effect.
   - `ZapiError` (base) / `ZapiAuthError` (login failures) — the only
     exceptions the library raises; consumers catch these, not raw `httpx`
     errors.
