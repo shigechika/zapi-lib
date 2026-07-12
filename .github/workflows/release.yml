@@ -13,7 +13,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Fail loudly if the version file disagrees with the tag (e.g. a hand-cut
       # tag, or a release-please updater that silently missed the file) rather
       # than shipping a mismatched version to PyPI.
@@ -31,7 +31,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
