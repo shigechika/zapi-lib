@@ -89,8 +89,9 @@ purely read-only either: `set_host_tag`, `acknowledge_problem`, and the
   Zabbix's `*.update` replaces the entire tag set whenever `tags` is present
   at all — even `[]` — so adding an unconditional `tags: []` will clear/wipe
   existing tags. Conversely, the current `if tags:` guard means `update_host`
-  cannot clear tags when no tags are provided. But `ZapiClient.set_host_tag` does the reverse: it *always*
-  sends a fully-rebuilt, non-empty `tags` list — fetch the host's current
+  cannot clear tags when no tags are provided. But `ZapiClient.set_host_tag`
+  does the reverse: it *always* sends a fully-rebuilt, non-empty `tags`
+  list — fetch the host's current
   tags, drop the same-named one, re-append the upsert — so its sent list is
   never empty and the "omit tags" reasoning does not apply to it. When
   rebuilding, it re-sends only the writable `{tag, value}` keys, deliberately
