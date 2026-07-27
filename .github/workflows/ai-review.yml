@@ -58,7 +58,10 @@ jobs:
           API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
           MODEL: ${{ vars.AI_REVIEW_MODEL || 'gpt-5.6-sol' }}
           PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
+          # gh resolves the target repo from the local git remote; with no
+          # checkout there is none, so every `gh pr ...` call below would fail
+          # to find the PR. GH_REPO makes the resolution explicit.
+          GH_REPO: ${{ github.repository }}
           # Guidance is read at the BASE revision, never the PR head — see the
           # loop below for why.
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -111,7 +114,7 @@ jobs:
             # target's content. A PR that legitimately adds guidance sees it
             # applied once merged, which is the intended trade.
             for f in CLAUDE.md AGENTS.md .github/copilot-instructions.md; do
-              body=$(gh api "repos/$REPO/contents/$f?ref=$BASE_SHA" \
+              body=$(gh api "repos/$GH_REPO/contents/$f?ref=$BASE_SHA" \
                        --jq 'select(.type=="file") | .content' 2>/dev/null \
                      | tr -d '\n' | base64 -d 2>/dev/null | head -c 8000) || body=""
               if [ -n "$body" ]; then
