@@ -114,9 +114,16 @@ jobs:
             # target's content. A PR that legitimately adds guidance sees it
             # applied once merged, which is the intended trade.
             for f in CLAUDE.md AGENTS.md .github/copilot-instructions.md; do
+              # Truncated with a substring expansion, not `| head -c`: under
+              # pipefail a head that stops early SIGPIPEs base64, the pipeline
+              # reports failure, and `|| body=""` then discards the prefix that
+              # was captured — turning "too long, truncate it" into "guidance
+              # silently absent". Today every guidance file fits in a pipe
+              # buffer so it never fires; that is not a reason to keep it.
               body=$(gh api "repos/$GH_REPO/contents/$f?ref=$BASE_SHA" \
                        --jq 'select(.type=="file") | .content' 2>/dev/null \
-                     | tr -d '\n' | base64 -d 2>/dev/null | head -c 8000) || body=""
+                     | tr -d '\n' | base64 -d 2>/dev/null) || body=""
+              body=${body:0:8000}
               if [ -n "$body" ]; then
                 echo "=== Repository guidance: $f ==="
                 printf '%s\n' "$body"
