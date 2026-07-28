@@ -58,7 +58,7 @@ tag      = my-collector    ; optional; managed-by marker tag on hosts/items
 ```python
 from zapi_lib import ZapiProvisioner
 
-with ZapiProvisioner.from_config() as z:   # ./config.ini, then ~/.config.ini
+with ZapiProvisioner.from_config() as z:  # ./config.ini, then ~/.config.ini
     z.show_version()
     host_ids = z.get_host_ids("pool-a") or z.create_host("pool-a", location="tokyo")
     host_id = host_ids[0]
