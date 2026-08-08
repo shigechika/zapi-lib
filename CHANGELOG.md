@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/shigechika/zapi-lib/compare/v0.3.0...v0.4.0) (2026-08-08)
+
+
+### Features
+
+* add pr-gate.yml admission control caller ([#22](https://github.com/shigechika/zapi-lib/issues/22)) ([6f3c852](https://github.com/shigechika/zapi-lib/commit/6f3c852c561c1441e5a9dc5d710e9b23a2938106))
+
 ## [0.3.0](https://github.com/shigechika/zapi-lib/compare/v0.2.0...v0.3.0) (2026-06-06)
 
 
