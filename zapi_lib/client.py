@@ -618,11 +618,18 @@ class ZapiProvisioner(ZapiClient):
         host.get must still be able to no-op an idempotent repeat call).
         ``tags`` is only meaningful together with a ``location``-tag-based
         selection (see ``set_maintenance``) -- explicit host-name selection
-        (``set_maintenance_for_hosts``) passes none.
+        (``set_maintenance_for_hosts``) passes none. The window name also
+        encodes which of the two selection modes created it (``t``ag vs.
+        ``h``ost) so a tag-based and a host-based call can never collide on
+        the same ``name``+``since`` and silently return each other's window
+        id without the requested hosts ever being added (/code-review
+        high-effort finding: two independent selection modes sharing one
+        idempotency namespace is a real collision risk once both exist).
         """
         since_dt = self._parse_maintenance_time(since)
         till_dt = self._parse_maintenance_time(till)
-        maint_name = name + since_dt.strftime("%y%m%d%H%M")
+        mode = "t" if tags is not None else "h"
+        maint_name = name + since_dt.strftime("%y%m%d%H%M") + mode
 
         existing = self._call("maintenance.get", {"filter": {"name": maint_name}, "output": ["maintenanceid"]})
         if existing:
@@ -666,21 +673,24 @@ class ZapiProvisioner(ZapiClient):
         )
 
     def _resolve_hostids_by_name(self, hosts: list[str]) -> list[str]:
-        """Resolve exact host names to ids, raising ZapiError (not a silent
-        partial match) if any name doesn't resolve -- a maintenance window
-        that silently drops an unrecognized host leaves it unprotected
-        without telling the caller."""
-        hostids: set[str] = set()
-        missing: list[str] = []
-        for host in hosts:
-            ids = self.get_host_ids(host)
-            if not ids:
-                missing.append(host)
-                continue
-            hostids.update(ids)
+        """Resolve exact host names to ids in one batched ``host.get`` call
+        (Zabbix's ``host`` filter accepts an array), raising ZapiError (not a
+        silent partial match) if any name doesn't resolve or ``hosts`` is
+        empty -- a maintenance window that silently drops an unrecognized
+        host, or protects nothing, leaves the caller's real target
+        unprotected without telling them.
+
+        Assumes Zabbix's own host-name-uniqueness constraint (``host.host``
+        is unique server-wide), so at most one row is expected per name.
+        """
+        if not hosts:
+            raise ZapiError("set_maintenance_for_hosts requires at least one host name")
+        rows = self._call("host.get", {"filter": {"host": hosts}, "output": ["hostid", "host"]})
+        found = {row["host"]: row["hostid"] for row in rows}
+        missing = [host for host in hosts if host not in found]
         if missing:
             raise ZapiError(f"host(s) not found: {', '.join(missing)}")
-        return sorted(hostids)
+        return sorted(set(found.values()))
 
     def set_maintenance_for_hosts(
         self, hosts: list[str], since: str, till: str, name: str, description: str

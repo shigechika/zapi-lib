@@ -590,7 +590,7 @@ def test_set_maintenance_creates_with_name_period_and_hosts():
         result = z.set_maintenance("tokyo", "2025/03/15 09:30:00", "2025/03/15 11:30:00", "MW-", "desc")
         assert result == ["999"]
         call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.create")
-        assert call["params"]["name"] == "MW-2503150930"  # name + start %y%m%d%H%M
+        assert call["params"]["name"] == "MW-2503150930t"  # name + start %y%m%d%H%M + tag-mode marker
         assert call["params"]["timeperiods"][0]["period"] == 7200  # 2h in seconds
         assert call["params"]["tags"] == [{"tag": "location", "operator": "0", "value": "tokyo"}]
         assert call["params"]["hostids"] == ["1", "2"]
@@ -616,15 +616,11 @@ def test_set_maintenance_rejects_unparseable_timestamp_as_zapi_error():
 
 
 def test_set_maintenance_for_hosts_resolves_each_host_by_exact_name():
-    # host.get is called once per host name (get_host_ids), not a single
-    # array-filter call -- the router dispatches by method only, so every
-    # host.get in this test returns the same canned row; that's fine, the
-    # assertion is on the resulting hostids set, not per-call params.
     r = make_router(
         results={
             "maintenance.get": [],
             "maintenance.create": {"maintenanceids": ["999"]},
-            "host.get": [{"hostid": "3"}],
+            "host.get": [{"hostid": "3", "host": "cit-sw-to16"}, {"hostid": "4", "host": "cit-sw-ke22"}],
         }
     )
     with r:
@@ -633,10 +629,20 @@ def test_set_maintenance_for_hosts_resolves_each_host_by_exact_name():
             ["cit-sw-to16", "cit-sw-ke22"], "2025/03/15 09:30:00", "2025/03/15 11:30:00", "MW-", "desc"
         )
         assert result == ["999"]
+        host_get_calls = [x["payload"] for x in r.captured if x["payload"]["method"] == "host.get"]
+        assert len(host_get_calls) == 1  # one batched call, not one per host name
+        assert host_get_calls[0]["params"]["filter"] == {"host": ["cit-sw-to16", "cit-sw-ke22"]}
         call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.create")
-        assert call["params"]["name"] == "MW-2503150930"
-        assert call["params"]["hostids"] == ["3"]  # deduped across both host.get calls
+        assert call["params"]["name"] == "MW-2503150930h"  # name + start %y%m%d%H%M + host-mode marker
+        assert call["params"]["hostids"] == ["3", "4"]
         assert "tags" not in call["params"]  # no location tag involved in this mode
+
+
+def test_set_maintenance_for_hosts_rejects_empty_host_list():
+    with make_router():
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        with pytest.raises(ZapiError, match="requires at least one host name"):
+            z.set_maintenance_for_hosts([], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
 
 
 def test_set_maintenance_for_hosts_is_idempotent_when_window_exists():
@@ -652,16 +658,16 @@ def test_set_maintenance_for_hosts_is_idempotent_when_window_exists():
 
 
 def test_set_maintenance_for_hosts_raises_on_unresolved_host_name():
-    # host.get returns a row for every call (the router dispatches by method
-    # only), so both "cit-sw-to16" and the typo resolve to the SAME id here --
-    # this test instead forces a miss via an empty host.get table entry to
-    # exercise the "some names never resolve" path without needing per-call
-    # routing the shared fake doesn't support.
-    r = make_router(results={"maintenance.get": [], "host.get": []})
+    # One valid host and one typo: the batched host.get only returns a row
+    # for the valid one, so the typo must be reported rather than the
+    # window silently covering just the valid host.
+    r = make_router(results={"maintenance.get": [], "host.get": [{"hostid": "3", "host": "cit-sw-to16"}]})
     with r:
         z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
-        with pytest.raises(ZapiError, match="host.s. not found"):
-            z.set_maintenance_for_hosts(["cit-sw-typo22"], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
+        with pytest.raises(ZapiError, match="host.s. not found: cit-sw-typo22"):
+            z.set_maintenance_for_hosts(
+                ["cit-sw-to16", "cit-sw-typo22"], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc"
+            )
         # A window must never be created with partial/missing host coverage.
         assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
 
