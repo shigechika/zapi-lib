@@ -590,7 +590,9 @@ def test_set_maintenance_creates_with_name_period_and_hosts():
         result = z.set_maintenance("tokyo", "2025/03/15 09:30:00", "2025/03/15 11:30:00", "MW-", "desc")
         assert result == ["999"]
         call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.create")
-        assert call["params"]["name"] == "MW-2503150930"  # name + start %y%m%d%H%M
+        # Bare name + start %y%m%d%H%M, no suffix -- must match the pre-refactor
+        # format exactly so an upgrade doesn't orphan an already-active window.
+        assert call["params"]["name"] == "MW-2503150930"
         assert call["params"]["timeperiods"][0]["period"] == 7200  # 2h in seconds
         assert call["params"]["tags"] == [{"tag": "location", "operator": "0", "value": "tokyo"}]
         assert call["params"]["hostids"] == ["1", "2"]
@@ -602,6 +604,85 @@ def test_set_maintenance_is_idempotent_when_window_exists():
         z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
         result = z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
         assert result == ["555"]
+        assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
+        # Host resolution is lazy: a caller whose API role can maintenance.get
+        # but not host.get must still be able to no-op a repeat call.
+        assert not any(x["payload"]["method"] == "host.get" for x in r.captured)
+
+
+def test_set_maintenance_rejects_unparseable_timestamp_as_zapi_error():
+    with make_router():
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        with pytest.raises(ZapiError, match="invalid maintenance window timestamp"):
+            z.set_maintenance("tokyo", "not-a-date", "2025/01/01 01:00:00", "MW-", "desc")
+
+
+def test_set_maintenance_for_hosts_resolves_each_host_by_exact_name():
+    r = make_router(
+        results={
+            "maintenance.get": [],
+            "maintenance.create": {"maintenanceids": ["999"]},
+            "host.get": [{"hostid": "3", "host": "cit-sw-to16"}, {"hostid": "4", "host": "cit-sw-ke22"}],
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance_for_hosts(
+            ["cit-sw-to16", "cit-sw-ke22"], "2025/03/15 09:30:00", "2025/03/15 11:30:00", "MW-", "desc"
+        )
+        assert result == ["999"]
+        host_get_calls = [x["payload"] for x in r.captured if x["payload"]["method"] == "host.get"]
+        assert len(host_get_calls) == 1  # one batched call, not one per host name
+        assert host_get_calls[0]["params"]["filter"] == {"host": ["cit-sw-to16", "cit-sw-ke22"]}
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.create")
+        assert call["params"]["name"] == "MW-2503150930h"  # name + start %y%m%d%H%M + host-mode marker
+        assert call["params"]["hostids"] == ["3", "4"]
+        assert "tags" not in call["params"]  # no location tag involved in this mode
+
+
+def test_set_maintenance_for_hosts_rejects_empty_host_list():
+    with make_router():
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        with pytest.raises(ZapiError, match="requires at least one host name"):
+            z.set_maintenance_for_hosts([], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
+
+
+def test_set_maintenance_for_hosts_rejects_empty_list_even_when_window_already_exists():
+    # The empty-list check must fire before the idempotency lookup, or an
+    # empty list would silently "succeed" (returning the unrelated existing
+    # window's id) whenever a same-named window happens to already exist.
+    r = make_router(results={"maintenance.get": [{"maintenanceid": "555"}]})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        with pytest.raises(ZapiError, match="requires at least one host name"):
+            z.set_maintenance_for_hosts([], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
+        assert not any(x["payload"]["method"] == "maintenance.get" for x in r.captured)
+
+
+def test_set_maintenance_for_hosts_is_idempotent_when_window_exists():
+    r = make_router(results={"maintenance.get": [{"maintenanceid": "555"}]})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance_for_hosts(
+            ["cit-sw-to16"], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc"
+        )
+        assert result == ["555"]
+        assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
+        assert not any(x["payload"]["method"] == "host.get" for x in r.captured)
+
+
+def test_set_maintenance_for_hosts_raises_on_unresolved_host_name():
+    # One valid host and one typo: the batched host.get only returns a row
+    # for the valid one, so the typo must be reported rather than the
+    # window silently covering just the valid host.
+    r = make_router(results={"maintenance.get": [], "host.get": [{"hostid": "3", "host": "cit-sw-to16"}]})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        with pytest.raises(ZapiError, match="host.s. not found: cit-sw-typo22"):
+            z.set_maintenance_for_hosts(
+                ["cit-sw-to16", "cit-sw-typo22"], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc"
+            )
+        # A window must never be created with partial/missing host coverage.
         assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
 
 

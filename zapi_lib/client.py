@@ -11,6 +11,7 @@ import configparser
 import logging
 import os
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 import httpx
@@ -584,41 +585,140 @@ class ZapiProvisioner(ZapiClient):
     # ------------------------------------------------------------------
     # Maintenance
     # ------------------------------------------------------------------
-    def set_maintenance(self, location: str, since: str, till: str, name: str, description: str) -> list[str]:
-        """Create a maintenance window covering hosts with a matching ``location`` tag.
+    @staticmethod
+    def _parse_maintenance_time(value: str) -> datetime:
+        """Parse a maintenance since/till string, wrapping the library's error
+        contract (ZapiError/ZapiAuthError are the only exceptions this library
+        raises -- a raw ValueError escaping here would violate that)."""
+        try:
+            return datetime.strptime(value, "%Y/%m/%d %H:%M:%S")
+        except ValueError as e:
+            raise ZapiError(f"invalid maintenance window timestamp {value!r} (expected %Y/%m/%d %H:%M:%S): {e}") from e
+
+    def _create_maintenance_window(
+        self,
+        resolve_hostids: Callable[[], list[str]],
+        since: str,
+        till: str,
+        name: str,
+        description: str,
+        *,
+        tags: list[dict] | None = None,
+    ) -> list[str]:
+        """Shared idempotent maintenance-window creation.
 
         ``since``/``till`` are ``"%Y/%m/%d %H:%M:%S"`` strings. The window name is
         ``name`` + the start time (``%y%m%d%H%M``); an existing window with that
-        name is left untouched (idempotent) and its ids are returned.
+        name is left untouched (idempotent) and its ids are returned, WITHOUT
+        ever calling ``resolve_hostids`` -- host resolution is deliberately
+        lazy (a callable, not an already-resolved list) so a repeated call
+        against an existing window still short-circuits before touching
+        host.get/host-tag lookups, matching set_maintenance's pre-refactor
+        behavior (a caller whose API role can maintenance.get but not
+        host.get must still be able to no-op an idempotent repeat call).
+        ``tags`` is only meaningful together with a ``location``-tag-based
+        selection (see ``set_maintenance``) -- explicit host-name selection
+        (``set_maintenance_for_hosts``) passes none. Only the host-based mode
+        gets an ``h`` suffix appended to the window name; the tag-based mode's
+        name format is untouched (bare ``name`` + timestamp, exactly the
+        pre-refactor format) so a window created by an older release of
+        ``set_maintenance`` is still recognized as the same window across an
+        upgrade (/code-review R3F1). ``strftime("%y%m%d%H%M")`` is all
+        digits, so a bare tag-mode name can never end in ``h`` and the two
+        modes can never collide with each other under the same
+        ``name``+``since`` (the collision risk /code-review flagged when this
+        was briefly a symmetrical ``t``/``h`` suffix on both modes).
         """
-        since_dt = datetime.strptime(since, "%Y/%m/%d %H:%M:%S")
-        till_dt = datetime.strptime(till, "%Y/%m/%d %H:%M:%S")
-        maint_name = name + since_dt.strftime("%y%m%d%H%M")
+        since_dt = self._parse_maintenance_time(since)
+        till_dt = self._parse_maintenance_time(till)
+        mode_suffix = "" if tags is not None else "h"
+        maint_name = name + since_dt.strftime("%y%m%d%H%M") + mode_suffix
 
         existing = self._call("maintenance.get", {"filter": {"name": maint_name}, "output": ["maintenanceid"]})
         if existing:
             self.logger.info("maintenance already exists, skipping: %s", maint_name)
             return [e["maintenanceid"] for e in existing]
 
-        result = self._call(
-            "maintenance.create",
-            {
-                "active_since": int(time.mktime(since_dt.timetuple())),
-                "active_till": int(time.mktime(till_dt.timetuple())),
-                "name": maint_name,
-                "description": description,
-                "tags_evaltype": 0,
-                "hostids": self.get_host_ids_by_tag("location", location),
-                "timeperiods": [
-                    {
-                        "start_date": int(time.mktime(since_dt.timetuple())),
-                        "period": int((till_dt - since_dt).total_seconds()),
-                    }
-                ],
-                "tags": [{"tag": "location", "operator": "0", "value": location}],
-            },
-        )
+        payload = {
+            "active_since": int(time.mktime(since_dt.timetuple())),
+            "active_till": int(time.mktime(till_dt.timetuple())),
+            "name": maint_name,
+            "description": description,
+            "hostids": resolve_hostids(),
+            "timeperiods": [
+                {
+                    "start_date": int(time.mktime(since_dt.timetuple())),
+                    "period": int((till_dt - since_dt).total_seconds()),
+                }
+            ],
+        }
+        if tags is not None:
+            payload["tags_evaltype"] = 0
+            payload["tags"] = tags
+        result = self._call("maintenance.create", payload)
         return result["maintenanceids"]
+
+    def set_maintenance(self, location: str, since: str, till: str, name: str, description: str) -> list[str]:
+        """Create a maintenance window covering hosts with a matching ``location`` tag.
+
+        See ``_create_maintenance_window`` for the ``since``/``till``/idempotency
+        contract. Signature is fixed (positional, ``location`` first) for
+        backward compatibility with existing callers (e.g. ``nuwan-exec.py``);
+        use ``set_maintenance_for_hosts`` for explicit-hostname selection.
+        """
+        return self._create_maintenance_window(
+            lambda: self.get_host_ids_by_tag("location", location),
+            since,
+            till,
+            name,
+            description,
+            tags=[{"tag": "location", "operator": "0", "value": location}],
+        )
+
+    def _resolve_hostids_by_name(self, hosts: list[str]) -> list[str]:
+        """Resolve exact host names to ids in one batched ``host.get`` call
+        (Zabbix's ``host`` filter accepts an array), raising ZapiError (not a
+        silent partial match) if any name doesn't resolve or ``hosts`` is
+        empty -- a maintenance window that silently drops an unrecognized
+        host, or protects nothing, leaves the caller's real target
+        unprotected without telling them.
+
+        Assumes Zabbix's own host-name-uniqueness constraint (``host.host``
+        is unique server-wide), so at most one row is expected per name.
+        """
+        if not hosts:
+            raise ZapiError("set_maintenance_for_hosts requires at least one host name")
+        rows = self._call("host.get", {"filter": {"host": hosts}, "output": ["hostid", "host"]})
+        found = {row["host"]: row["hostid"] for row in rows}
+        missing = [host for host in hosts if host not in found]
+        if missing:
+            raise ZapiError(f"host(s) not found: {', '.join(missing)}")
+        return sorted(set(found.values()))
+
+    def set_maintenance_for_hosts(
+        self, hosts: list[str], since: str, till: str, name: str, description: str
+    ) -> list[str]:
+        """Create a maintenance window covering explicit hosts by exact technical name.
+
+        Same idempotent/window-naming contract as ``set_maintenance``, but
+        selects hosts by exact ``host.get`` technical name instead of a
+        ``location`` tag (useful when the affected hosts don't share one, or
+        when the operator wants precise host-level control). Raises
+        ``ZapiError`` if any of ``hosts`` doesn't resolve to a host id.
+
+        The ``hosts`` emptiness check runs eagerly, here, before the
+        idempotency lookup -- unlike host *resolution* (a network call,
+        deliberately lazy so a repeat call can no-op without host.get
+        access), checking whether the list is empty is a local, free check.
+        Deferring it into ``_resolve_hostids_by_name`` would let it be
+        silently skipped whenever a same-named window already exists
+        (/code-review R3F2).
+        """
+        if not hosts:
+            raise ZapiError("set_maintenance_for_hosts requires at least one host name")
+        return self._create_maintenance_window(
+            lambda: self._resolve_hostids_by_name(hosts), since, till, name, description
+        )
 
     def show_version(self) -> str:
         """Log and return the Zabbix API version detected at construction."""

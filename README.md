@@ -16,7 +16,8 @@ can depend on it without pulling in the MCP server stack (`mcp`, `starlette`, `u
   `acknowledge_problem`.
 - **Provisioning** (`ZapiProvisioner`): config-driven client that auto-creates trapper
   hosts/items stamped with a managed-by tag — `create_host`, `update_host`, `create_item`,
-  `update_item`, `set_maintenance`, plus `ensure_group` / `get_host_ids` / `get_item_ids`.
+  `update_item`, `set_maintenance`, `set_maintenance_for_hosts`, plus
+  `ensure_group` / `get_host_ids` / `get_item_ids`.
 - **Escape hatch**: `call(method, params)` invokes any JSON-RPC method directly.
 - A single runtime dependency: `httpx`.
 
@@ -68,7 +69,10 @@ with ZapiProvisioner.from_config() as z:  # ./config.ini, then ~/.config.ini
 
 `update_host` replaces the host's groups and tags (use `set_host_tag` to upsert a single
 tag instead). `set_maintenance(location, since, till, name, description)` opens an
-idempotent maintenance window over hosts carrying a matching `location` tag.
+idempotent maintenance window over hosts carrying a matching `location` tag;
+`set_maintenance_for_hosts(hosts, since, till, name, description)` does the same over an
+explicit list of exact host (technical) names instead, for when the affected hosts don't
+share a tag or precise host-level control is wanted.
 
 ## License
 
