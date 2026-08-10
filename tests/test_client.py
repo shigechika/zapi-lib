@@ -1,6 +1,7 @@
 """Tests for ZapiClient — auth path selection, tag filters, API methods."""
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -608,6 +609,31 @@ def test_set_maintenance_idempotent_path_works_on_plain_zapiclient():
         c = ZapiClient("https://zabbix.example.com", "u", "p")
         result = c.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
         assert result == ["555"]
+
+
+def test_zapiclient_logger_defaults_to_module_logger():
+    with make_router():
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.logger is logging.getLogger("zapi_lib.client")
+
+
+def test_zapiclient_custom_logger_is_used():
+    custom = logging.getLogger("custom-test-logger")
+    with make_router():
+        c = ZapiClient("https://zabbix.example.com", "u", "p", logger=custom)
+        assert c.logger is custom
+
+
+def test_provisioner_logger_forwards_through_super_init():
+    # The core change this PR makes is *who* owns self.logger across the
+    # class hierarchy (ZapiClient now sets it; ZapiProvisioner forwards its
+    # own logger= kwarg to super().__init__ instead of setting it itself).
+    # Every existing ZapiProvisioner(...) construction in this test file
+    # omits logger=, so none of them would catch a regression here.
+    custom = logging.getLogger("custom-provisioner-logger")
+    with make_router():
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", logger=custom)
+        assert z.logger is custom
 
 
 def test_set_maintenance_creates_with_name_period_and_hosts():

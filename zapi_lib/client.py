@@ -56,7 +56,7 @@ class ZapiClient:
         # Every instance gets a usable self.logger, not just ZapiProvisioner
         # (whose __init__ used to be the only place this was set -- a plain
         # ZapiClient hit AttributeError as soon as any code path here logged,
-        # e.g. the maintenance-window idempotent-return path; /code-review R1F1).
+        # e.g. the maintenance-window idempotent-return path below).
         self.logger = logger or _logger
         base = url.rstrip("/")
         if not base.endswith("/api_jsonrpc.php"):
@@ -410,15 +410,25 @@ class ZapiClient:
     ) -> list[str]:
         """Shared idempotent maintenance-window creation.
 
-        ``since``/``till`` are ``"%Y/%m/%d %H:%M:%S"`` strings. The window name is
-        ``name`` + the start time (``%y%m%d%H%M``); an existing window with that
-        name is left untouched (idempotent) and its ids are returned, WITHOUT
-        ever calling ``resolve_hostids`` -- host resolution is deliberately
-        lazy (a callable, not an already-resolved list) so a repeated call
-        against an existing window still short-circuits before touching
-        host.get/host-tag lookups, matching set_maintenance's pre-refactor
-        behavior (a caller whose API role can maintenance.get but not
-        host.get must still be able to no-op an idempotent repeat call).
+        ``since``/``till`` are ``"%Y/%m/%d %H:%M:%S"`` **naive** strings --
+        parsed and converted to epoch seconds via the calling process's local
+        timezone (``time.mktime``), not a fixed zone. Callers running outside
+        JST (or wanting a specific zone regardless of the host's) must convert
+        before calling.
+        The window name is ``name`` + the start time (``%y%m%d%H%M``); an
+        existing window with that name is left untouched (idempotent) and its
+        ids are returned, WITHOUT ever calling ``resolve_hostids`` -- host
+        resolution is deliberately lazy (a callable, not an already-resolved
+        list) so a repeated call against an existing window still
+        short-circuits before touching host.get/host-tag lookups, matching
+        set_maintenance's pre-refactor behavior (a caller whose API role can
+        maintenance.get but not host.get must still be able to no-op an
+        idempotent repeat call). Note this check-then-act is not atomic with
+        the ``maintenance.create`` below; truly concurrent callers with the
+        same name+since could each observe no existing window and create a
+        duplicate -- accepted for now given this library's actual callers are
+        single-shot scripts or a human-gated approval flow, not a source of
+        real concurrent writers.
         ``tags`` is only meaningful together with a ``location``-tag-based
         selection (see ``set_maintenance``) -- explicit host-name selection
         (``set_maintenance_for_hosts``) passes none. Only the host-based mode
@@ -426,11 +436,9 @@ class ZapiClient:
         name format is untouched (bare ``name`` + timestamp, exactly the
         pre-refactor format) so a window created by an older release of
         ``set_maintenance`` is still recognized as the same window across an
-        upgrade (/code-review R3F1). ``strftime("%y%m%d%H%M")`` is all
-        digits, so a bare tag-mode name can never end in ``h`` and the two
-        modes can never collide with each other under the same
-        ``name``+``since`` (the collision risk /code-review flagged when this
-        was briefly a symmetrical ``t``/``h`` suffix on both modes).
+        upgrade. ``strftime("%y%m%d%H%M")`` is all digits, so a bare tag-mode
+        name can never end in ``h`` and the two modes can never collide with
+        each other under the same ``name``+``since``.
         """
         since_dt = self._parse_maintenance_time(since)
         till_dt = self._parse_maintenance_time(till)
@@ -486,6 +494,12 @@ class ZapiClient:
         host, or protects nothing, leaves the caller's real target
         unprotected without telling them.
 
+        The empty-``hosts`` check is unreachable through the current sole
+        caller (``set_maintenance_for_hosts`` checks the same thing eagerly,
+        before this is ever invoked) -- kept anyway as defense-in-depth for
+        this private method, since a future second caller of it shouldn't
+        have to remember to re-derive the same guard.
+
         Assumes Zabbix's own host-name-uniqueness constraint (``host.host``
         is unique server-wide), so at most one row is expected per name.
         """
@@ -514,8 +528,7 @@ class ZapiClient:
         deliberately lazy so a repeat call can no-op without host.get
         access), checking whether the list is empty is a local, free check.
         Deferring it into ``_resolve_hostids_by_name`` would let it be
-        silently skipped whenever a same-named window already exists
-        (/code-review R3F2).
+        silently skipped whenever a same-named window already exists.
         """
         if not hosts:
             raise ZapiError("set_maintenance_for_hosts requires at least one host name")
