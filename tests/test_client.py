@@ -603,6 +603,16 @@ def test_set_maintenance_is_idempotent_when_window_exists():
         result = z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
         assert result == ["555"]
         assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
+        # Host resolution is lazy: a caller whose API role can maintenance.get
+        # but not host.get must still be able to no-op a repeat call.
+        assert not any(x["payload"]["method"] == "host.get" for x in r.captured)
+
+
+def test_set_maintenance_rejects_unparseable_timestamp_as_zapi_error():
+    with make_router():
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        with pytest.raises(ZapiError, match="invalid maintenance window timestamp"):
+            z.set_maintenance("tokyo", "not-a-date", "2025/01/01 01:00:00", "MW-", "desc")
 
 
 def test_set_maintenance_for_hosts_resolves_each_host_by_exact_name():
@@ -637,6 +647,22 @@ def test_set_maintenance_for_hosts_is_idempotent_when_window_exists():
             ["cit-sw-to16"], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc"
         )
         assert result == ["555"]
+        assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
+        assert not any(x["payload"]["method"] == "host.get" for x in r.captured)
+
+
+def test_set_maintenance_for_hosts_raises_on_unresolved_host_name():
+    # host.get returns a row for every call (the router dispatches by method
+    # only), so both "cit-sw-to16" and the typo resolve to the SAME id here --
+    # this test instead forces a miss via an empty host.get table entry to
+    # exercise the "some names never resolve" path without needing per-call
+    # routing the shared fake doesn't support.
+    r = make_router(results={"maintenance.get": [], "host.get": []})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        with pytest.raises(ZapiError, match="host.s. not found"):
+            z.set_maintenance_for_hosts(["cit-sw-typo22"], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
+        # A window must never be created with partial/missing host coverage.
         assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
 
 

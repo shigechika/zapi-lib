@@ -11,6 +11,7 @@ import configparser
 import logging
 import os
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 import httpx
@@ -584,9 +585,19 @@ class ZapiProvisioner(ZapiClient):
     # ------------------------------------------------------------------
     # Maintenance
     # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_maintenance_time(value: str) -> datetime:
+        """Parse a maintenance since/till string, wrapping the library's error
+        contract (ZapiError/ZapiAuthError are the only exceptions this library
+        raises -- a raw ValueError escaping here would violate that)."""
+        try:
+            return datetime.strptime(value, "%Y/%m/%d %H:%M:%S")
+        except ValueError as e:
+            raise ZapiError(f"invalid maintenance window timestamp {value!r} (expected %Y/%m/%d %H:%M:%S): {e}") from e
+
     def _create_maintenance_window(
         self,
-        hostids: list[str],
+        resolve_hostids: Callable[[], list[str]],
         since: str,
         till: str,
         name: str,
@@ -598,13 +609,19 @@ class ZapiProvisioner(ZapiClient):
 
         ``since``/``till`` are ``"%Y/%m/%d %H:%M:%S"`` strings. The window name is
         ``name`` + the start time (``%y%m%d%H%M``); an existing window with that
-        name is left untouched (idempotent) and its ids are returned. ``tags``
-        is only meaningful together with a non-empty ``hostids`` selection
-        made *by* those tags (see ``set_maintenance``) -- explicit host-name
-        selection (``set_maintenance_for_hosts``) passes none.
+        name is left untouched (idempotent) and its ids are returned, WITHOUT
+        ever calling ``resolve_hostids`` -- host resolution is deliberately
+        lazy (a callable, not an already-resolved list) so a repeated call
+        against an existing window still short-circuits before touching
+        host.get/host-tag lookups, matching set_maintenance's pre-refactor
+        behavior (a caller whose API role can maintenance.get but not
+        host.get must still be able to no-op an idempotent repeat call).
+        ``tags`` is only meaningful together with a ``location``-tag-based
+        selection (see ``set_maintenance``) -- explicit host-name selection
+        (``set_maintenance_for_hosts``) passes none.
         """
-        since_dt = datetime.strptime(since, "%Y/%m/%d %H:%M:%S")
-        till_dt = datetime.strptime(till, "%Y/%m/%d %H:%M:%S")
+        since_dt = self._parse_maintenance_time(since)
+        till_dt = self._parse_maintenance_time(till)
         maint_name = name + since_dt.strftime("%y%m%d%H%M")
 
         existing = self._call("maintenance.get", {"filter": {"name": maint_name}, "output": ["maintenanceid"]})
@@ -617,7 +634,7 @@ class ZapiProvisioner(ZapiClient):
             "active_till": int(time.mktime(till_dt.timetuple())),
             "name": maint_name,
             "description": description,
-            "hostids": hostids,
+            "hostids": resolve_hostids(),
             "timeperiods": [
                 {
                     "start_date": int(time.mktime(since_dt.timetuple())),
@@ -639,15 +656,31 @@ class ZapiProvisioner(ZapiClient):
         backward compatibility with existing callers (e.g. ``nuwan-exec.py``);
         use ``set_maintenance_for_hosts`` for explicit-hostname selection.
         """
-        hostids = self.get_host_ids_by_tag("location", location)
         return self._create_maintenance_window(
-            hostids,
+            lambda: self.get_host_ids_by_tag("location", location),
             since,
             till,
             name,
             description,
             tags=[{"tag": "location", "operator": "0", "value": location}],
         )
+
+    def _resolve_hostids_by_name(self, hosts: list[str]) -> list[str]:
+        """Resolve exact host names to ids, raising ZapiError (not a silent
+        partial match) if any name doesn't resolve -- a maintenance window
+        that silently drops an unrecognized host leaves it unprotected
+        without telling the caller."""
+        hostids: set[str] = set()
+        missing: list[str] = []
+        for host in hosts:
+            ids = self.get_host_ids(host)
+            if not ids:
+                missing.append(host)
+                continue
+            hostids.update(ids)
+        if missing:
+            raise ZapiError(f"host(s) not found: {', '.join(missing)}")
+        return sorted(hostids)
 
     def set_maintenance_for_hosts(
         self, hosts: list[str], since: str, till: str, name: str, description: str
@@ -657,10 +690,12 @@ class ZapiProvisioner(ZapiClient):
         Same idempotent/window-naming contract as ``set_maintenance``, but
         selects hosts by exact ``host.get`` technical name instead of a
         ``location`` tag (useful when the affected hosts don't share one, or
-        when the operator wants precise host-level control).
+        when the operator wants precise host-level control). Raises
+        ``ZapiError`` if any of ``hosts`` doesn't resolve to a host id.
         """
-        hostids = sorted({hostid for host in hosts for hostid in self.get_host_ids(host)})
-        return self._create_maintenance_window(hostids, since, till, name, description)
+        return self._create_maintenance_window(
+            lambda: self._resolve_hostids_by_name(hosts), since, till, name, description
+        )
 
     def show_version(self) -> str:
         """Log and return the Zabbix API version detected at construction."""
