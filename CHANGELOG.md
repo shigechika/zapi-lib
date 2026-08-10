@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/shigechika/zapi-lib/compare/v0.5.0...v0.5.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* move set_maintenance/set_maintenance_for_hosts to ZapiClient ([#26](https://github.com/shigechika/zapi-lib/issues/26)) ([86bc807](https://github.com/shigechika/zapi-lib/commit/86bc807fe3c38e6f1a6347d509f3dad57b4093c6))
+
 ## [0.5.0](https://github.com/shigechika/zapi-lib/compare/v0.4.0...v0.5.0) (2026-08-10)
 
 
