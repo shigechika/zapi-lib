@@ -44,7 +44,20 @@ def tag_filter(tag: str, value: str | None = None) -> dict:
 class ZapiClient:
     """Minimal Zabbix API client using JSON-RPC over a single endpoint."""
 
-    def __init__(self, url: str, user: str, password: str, *, timeout: int = DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        url: str,
+        user: str,
+        password: str,
+        *,
+        logger: logging.Logger | None = None,
+        timeout: int = DEFAULT_TIMEOUT,
+    ):
+        # Every instance gets a usable self.logger, not just ZapiProvisioner
+        # (whose __init__ used to be the only place this was set -- a plain
+        # ZapiClient hit AttributeError as soon as any code path here logged,
+        # e.g. the maintenance-window idempotent-return path; /code-review R1F1).
+        self.logger = logger or _logger
         base = url.rstrip("/")
         if not base.endswith("/api_jsonrpc.php"):
             base += "/api_jsonrpc.php"
@@ -557,11 +570,13 @@ class ZapiProvisioner(ZapiClient):
     ):
         # Set provisioning state before super().__init__ touches the network, so
         # the instance is fully formed even if login raises during construction.
-        self.logger = logger or _logger
+        # logger itself is now ZapiClient's job (passed through, not set here
+        # directly) -- a single source of truth instead of two competing
+        # `logger or _logger` assignments across the class hierarchy.
         self.default_group = group
         self.default_location = location
         self.managed_tag = managed_tag
-        super().__init__(url, user, password, timeout=timeout)
+        super().__init__(url, user, password, logger=logger, timeout=timeout)
         # Resolve the default group id (GET only — no write side effect at
         # construction). It is created on demand when a host is first written
         # (see _group_list), so a provisioner used only for reads / raw calls

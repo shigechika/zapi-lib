@@ -598,6 +598,18 @@ def test_set_maintenance_is_available_on_plain_zapiclient():
         assert result == ["1"]
 
 
+def test_set_maintenance_idempotent_path_works_on_plain_zapiclient():
+    # The idempotent short-circuit (an existing window found) logs via
+    # self.logger -- previously only set by ZapiProvisioner.__init__, so a
+    # plain ZapiClient hit AttributeError here specifically (the create path
+    # above doesn't log, so it alone didn't catch this).
+    r = make_router(results={"maintenance.get": [{"maintenanceid": "555"}]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        result = c.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
+        assert result == ["555"]
+
+
 def test_set_maintenance_creates_with_name_period_and_hosts():
     r = make_router(
         results={
