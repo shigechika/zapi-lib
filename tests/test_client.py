@@ -1,6 +1,7 @@
 """Tests for ZapiClient — auth path selection, tag filters, API methods."""
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -575,6 +576,64 @@ def test_update_item_sets_value_type_without_touching_tags():
         call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "item.update")
         assert call["params"]["value_type"] == 1
         assert "tags" not in call["params"]  # tags preserved (item.update replaces the whole set)
+
+
+def test_set_maintenance_is_available_on_plain_zapiclient():
+    # set_maintenance/set_maintenance_for_hosts were originally only on
+    # ZapiProvisioner (a ZapiClient subclass), so a caller holding a plain
+    # ZapiClient -- e.g. zapi-mcp, which has no provisioning needs -- got an
+    # AttributeError. Moved onto ZapiClient itself; this is the regression
+    # test for that bug, not for ZapiProvisioner-specific behavior.
+    r = make_router(
+        results={
+            "maintenance.get": [],
+            "maintenance.create": {"maintenanceids": ["1"]},
+            "host.get": [{"hostid": "3", "host": "cit-sw-to16"}],
+        }
+    )
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        result = c.set_maintenance_for_hosts(
+            ["cit-sw-to16"], "2025/03/15 09:30:00", "2025/03/15 11:30:00", "MW-", "desc"
+        )
+        assert result == ["1"]
+
+
+def test_set_maintenance_idempotent_path_works_on_plain_zapiclient():
+    # The idempotent short-circuit (an existing window found) logs via
+    # self.logger -- previously only set by ZapiProvisioner.__init__, so a
+    # plain ZapiClient hit AttributeError here specifically (the create path
+    # above doesn't log, so it alone didn't catch this).
+    r = make_router(results={"maintenance.get": [{"maintenanceid": "555"}]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        result = c.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc")
+        assert result == ["555"]
+
+
+def test_zapiclient_logger_defaults_to_module_logger():
+    with make_router():
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        assert c.logger is logging.getLogger("zapi_lib.client")
+
+
+def test_zapiclient_custom_logger_is_used():
+    custom = logging.getLogger("custom-test-logger")
+    with make_router():
+        c = ZapiClient("https://zabbix.example.com", "u", "p", logger=custom)
+        assert c.logger is custom
+
+
+def test_provisioner_logger_forwards_through_super_init():
+    # The core change this PR makes is *who* owns self.logger across the
+    # class hierarchy (ZapiClient now sets it; ZapiProvisioner forwards its
+    # own logger= kwarg to super().__init__ instead of setting it itself).
+    # Every existing ZapiProvisioner(...) construction in this test file
+    # omits logger=, so none of them would catch a regression here.
+    custom = logging.getLogger("custom-provisioner-logger")
+    with make_router():
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p", logger=custom)
+        assert z.logger is custom
 
 
 def test_set_maintenance_creates_with_name_period_and_hosts():

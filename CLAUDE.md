@@ -27,16 +27,24 @@ no stdio/transport concerns, just an importable package.
     lockout/audit pressure). Read helpers (`get_hosts`, `get_items`,
     `get_problems`, `count_problems`, `get_events`, `get_group_id`,
     `get_host_ids`/`get_host_ids_by_tag`/`get_item_ids`); write helpers
-    (`set_host_tag`, `acknowledge_problem`, and the group-creation path
-    `create_group`/`ensure_group`); and `call()` as an escape hatch for
-    JSON-RPC methods without a dedicated wrapper. Construction itself hits
-    the network (`apiinfo.version` + `user.login`) and closes the httpx
-    client if that raises (since `__enter__`/`__exit__` never run for a
-    failed constructor).
+    (`set_host_tag`, `acknowledge_problem`, the group-creation path
+    `create_group`/`ensure_group`, and `set_maintenance`/
+    `set_maintenance_for_hosts` — idempotent maintenance windows by
+    `location` tag or by exact host name respectively, sharing a private
+    `_create_maintenance_window` helper that takes a *lazy* hostid-resolver
+    callable so a repeat call against an already-existing window never
+    touches `host.get` even though the two selection modes must resolve
+    hosts differently; deliberately moved here from `ZapiProvisioner` since
+    neither needs provisioning config, and a caller with no provisioning
+    needs (e.g. zapi-mcp) still needs maintenance windows); and `call()` as
+    an escape hatch for JSON-RPC methods without a dedicated wrapper.
+    Construction itself hits the network (`apiinfo.version` + `user.login`)
+    and closes the httpx client if that raises (since `__enter__`/`__exit__`
+    never run for a failed constructor).
   - `ZapiProvisioner(ZapiClient)` — config-driven (`config.ini` `[zabbix]`
     section via `from_config`) provisioning: `create_host`/`update_host`/
-    `create_item`/`update_item`/`set_maintenance` (the group/id helpers
-    above are inherited from `ZapiClient`, not defined here). Auto-creates
+    `create_item`/`update_item` (the group/id helpers and maintenance
+    helpers above are inherited from `ZapiClient`, not defined here). Auto-creates
     trapper hosts/items tagged with a managed-by marker; the default group
     is resolved read-only at construction and created lazily on the first
     host write, so constructing a provisioner has no write side effect.
