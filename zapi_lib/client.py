@@ -618,18 +618,21 @@ class ZapiProvisioner(ZapiClient):
         host.get must still be able to no-op an idempotent repeat call).
         ``tags`` is only meaningful together with a ``location``-tag-based
         selection (see ``set_maintenance``) -- explicit host-name selection
-        (``set_maintenance_for_hosts``) passes none. The window name also
-        encodes which of the two selection modes created it (``t``ag vs.
-        ``h``ost) so a tag-based and a host-based call can never collide on
-        the same ``name``+``since`` and silently return each other's window
-        id without the requested hosts ever being added (/code-review
-        high-effort finding: two independent selection modes sharing one
-        idempotency namespace is a real collision risk once both exist).
+        (``set_maintenance_for_hosts``) passes none. Only the host-based mode
+        gets an ``h`` suffix appended to the window name; the tag-based mode's
+        name format is untouched (bare ``name`` + timestamp, exactly the
+        pre-refactor format) so a window created by an older release of
+        ``set_maintenance`` is still recognized as the same window across an
+        upgrade (/code-review R3F1). ``strftime("%y%m%d%H%M")`` is all
+        digits, so a bare tag-mode name can never end in ``h`` and the two
+        modes can never collide with each other under the same
+        ``name``+``since`` (the collision risk /code-review flagged when this
+        was briefly a symmetrical ``t``/``h`` suffix on both modes).
         """
         since_dt = self._parse_maintenance_time(since)
         till_dt = self._parse_maintenance_time(till)
-        mode = "t" if tags is not None else "h"
-        maint_name = name + since_dt.strftime("%y%m%d%H%M") + mode
+        mode_suffix = "" if tags is not None else "h"
+        maint_name = name + since_dt.strftime("%y%m%d%H%M") + mode_suffix
 
         existing = self._call("maintenance.get", {"filter": {"name": maint_name}, "output": ["maintenanceid"]})
         if existing:
@@ -702,7 +705,17 @@ class ZapiProvisioner(ZapiClient):
         ``location`` tag (useful when the affected hosts don't share one, or
         when the operator wants precise host-level control). Raises
         ``ZapiError`` if any of ``hosts`` doesn't resolve to a host id.
+
+        The ``hosts`` emptiness check runs eagerly, here, before the
+        idempotency lookup -- unlike host *resolution* (a network call,
+        deliberately lazy so a repeat call can no-op without host.get
+        access), checking whether the list is empty is a local, free check.
+        Deferring it into ``_resolve_hostids_by_name`` would let it be
+        silently skipped whenever a same-named window already exists
+        (/code-review R3F2).
         """
+        if not hosts:
+            raise ZapiError("set_maintenance_for_hosts requires at least one host name")
         return self._create_maintenance_window(
             lambda: self._resolve_hostids_by_name(hosts), since, till, name, description
         )
