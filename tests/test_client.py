@@ -577,6 +577,27 @@ def test_update_item_sets_value_type_without_touching_tags():
         assert "tags" not in call["params"]  # tags preserved (item.update replaces the whole set)
 
 
+def test_set_maintenance_is_available_on_plain_zapiclient():
+    # set_maintenance/set_maintenance_for_hosts were originally only on
+    # ZapiProvisioner (a ZapiClient subclass), so a caller holding a plain
+    # ZapiClient -- e.g. zapi-mcp, which has no provisioning needs -- got an
+    # AttributeError. Moved onto ZapiClient itself; this is the regression
+    # test for that bug, not for ZapiProvisioner-specific behavior.
+    r = make_router(
+        results={
+            "maintenance.get": [],
+            "maintenance.create": {"maintenanceids": ["1"]},
+            "host.get": [{"hostid": "3", "host": "cit-sw-to16"}],
+        }
+    )
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        result = c.set_maintenance_for_hosts(
+            ["cit-sw-to16"], "2025/03/15 09:30:00", "2025/03/15 11:30:00", "MW-", "desc"
+        )
+        assert result == ["1"]
+
+
 def test_set_maintenance_creates_with_name_period_and_hosts():
     r = make_router(
         results={
