@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/shigechika/zapi-lib/compare/v0.4.0...v0.5.0) (2026-08-10)
+
+
+### Features
+
+* add set_maintenance_for_hosts for explicit host-name maintenance windows ([#24](https://github.com/shigechika/zapi-lib/issues/24)) ([dd9230b](https://github.com/shigechika/zapi-lib/commit/dd9230b46ac00b0a81aead5000fa95c756ad7401))
+
 ## [0.4.0](https://github.com/shigechika/zapi-lib/compare/v0.3.0...v0.4.0) (2026-08-08)
 
 
