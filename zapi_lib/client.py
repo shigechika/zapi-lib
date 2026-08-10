@@ -584,12 +584,24 @@ class ZapiProvisioner(ZapiClient):
     # ------------------------------------------------------------------
     # Maintenance
     # ------------------------------------------------------------------
-    def set_maintenance(self, location: str, since: str, till: str, name: str, description: str) -> list[str]:
-        """Create a maintenance window covering hosts with a matching ``location`` tag.
+    def _create_maintenance_window(
+        self,
+        hostids: list[str],
+        since: str,
+        till: str,
+        name: str,
+        description: str,
+        *,
+        tags: list[dict] | None = None,
+    ) -> list[str]:
+        """Shared idempotent maintenance-window creation.
 
         ``since``/``till`` are ``"%Y/%m/%d %H:%M:%S"`` strings. The window name is
         ``name`` + the start time (``%y%m%d%H%M``); an existing window with that
-        name is left untouched (idempotent) and its ids are returned.
+        name is left untouched (idempotent) and its ids are returned. ``tags``
+        is only meaningful together with a non-empty ``hostids`` selection
+        made *by* those tags (see ``set_maintenance``) -- explicit host-name
+        selection (``set_maintenance_for_hosts``) passes none.
         """
         since_dt = datetime.strptime(since, "%Y/%m/%d %H:%M:%S")
         till_dt = datetime.strptime(till, "%Y/%m/%d %H:%M:%S")
@@ -600,25 +612,55 @@ class ZapiProvisioner(ZapiClient):
             self.logger.info("maintenance already exists, skipping: %s", maint_name)
             return [e["maintenanceid"] for e in existing]
 
-        result = self._call(
-            "maintenance.create",
-            {
-                "active_since": int(time.mktime(since_dt.timetuple())),
-                "active_till": int(time.mktime(till_dt.timetuple())),
-                "name": maint_name,
-                "description": description,
-                "tags_evaltype": 0,
-                "hostids": self.get_host_ids_by_tag("location", location),
-                "timeperiods": [
-                    {
-                        "start_date": int(time.mktime(since_dt.timetuple())),
-                        "period": int((till_dt - since_dt).total_seconds()),
-                    }
-                ],
-                "tags": [{"tag": "location", "operator": "0", "value": location}],
-            },
-        )
+        payload = {
+            "active_since": int(time.mktime(since_dt.timetuple())),
+            "active_till": int(time.mktime(till_dt.timetuple())),
+            "name": maint_name,
+            "description": description,
+            "hostids": hostids,
+            "timeperiods": [
+                {
+                    "start_date": int(time.mktime(since_dt.timetuple())),
+                    "period": int((till_dt - since_dt).total_seconds()),
+                }
+            ],
+        }
+        if tags is not None:
+            payload["tags_evaltype"] = 0
+            payload["tags"] = tags
+        result = self._call("maintenance.create", payload)
         return result["maintenanceids"]
+
+    def set_maintenance(self, location: str, since: str, till: str, name: str, description: str) -> list[str]:
+        """Create a maintenance window covering hosts with a matching ``location`` tag.
+
+        See ``_create_maintenance_window`` for the ``since``/``till``/idempotency
+        contract. Signature is fixed (positional, ``location`` first) for
+        backward compatibility with existing callers (e.g. ``nuwan-exec.py``);
+        use ``set_maintenance_for_hosts`` for explicit-hostname selection.
+        """
+        hostids = self.get_host_ids_by_tag("location", location)
+        return self._create_maintenance_window(
+            hostids,
+            since,
+            till,
+            name,
+            description,
+            tags=[{"tag": "location", "operator": "0", "value": location}],
+        )
+
+    def set_maintenance_for_hosts(
+        self, hosts: list[str], since: str, till: str, name: str, description: str
+    ) -> list[str]:
+        """Create a maintenance window covering explicit hosts by exact technical name.
+
+        Same idempotent/window-naming contract as ``set_maintenance``, but
+        selects hosts by exact ``host.get`` technical name instead of a
+        ``location`` tag (useful when the affected hosts don't share one, or
+        when the operator wants precise host-level control).
+        """
+        hostids = sorted({hostid for host in hosts for hostid in self.get_host_ids(host)})
+        return self._create_maintenance_window(hostids, since, till, name, description)
 
     def show_version(self) -> str:
         """Log and return the Zabbix API version detected at construction."""

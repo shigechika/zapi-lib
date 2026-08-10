@@ -605,6 +605,41 @@ def test_set_maintenance_is_idempotent_when_window_exists():
         assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
 
 
+def test_set_maintenance_for_hosts_resolves_each_host_by_exact_name():
+    # host.get is called once per host name (get_host_ids), not a single
+    # array-filter call -- the router dispatches by method only, so every
+    # host.get in this test returns the same canned row; that's fine, the
+    # assertion is on the resulting hostids set, not per-call params.
+    r = make_router(
+        results={
+            "maintenance.get": [],
+            "maintenance.create": {"maintenanceids": ["999"]},
+            "host.get": [{"hostid": "3"}],
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance_for_hosts(
+            ["cit-sw-to16", "cit-sw-ke22"], "2025/03/15 09:30:00", "2025/03/15 11:30:00", "MW-", "desc"
+        )
+        assert result == ["999"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.create")
+        assert call["params"]["name"] == "MW-2503150930"
+        assert call["params"]["hostids"] == ["3"]  # deduped across both host.get calls
+        assert "tags" not in call["params"]  # no location tag involved in this mode
+
+
+def test_set_maintenance_for_hosts_is_idempotent_when_window_exists():
+    r = make_router(results={"maintenance.get": [{"maintenanceid": "555"}]})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance_for_hosts(
+            ["cit-sw-to16"], "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc"
+        )
+        assert result == ["555"]
+        assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
+
+
 def test_provisioner_show_version_returns_detected_version():
     r = make_router(version="6.0.42")
     with r:
