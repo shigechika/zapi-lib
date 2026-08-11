@@ -334,10 +334,15 @@ class ZapiClient:
         API rows rather than pre-interpreting them.
 
         The host-group selector is version-gated: Zabbix 6.4 renamed
-        ``selectGroups`` to ``selectHostGroups``, and 7.0 removed the old name
-        entirely (an unrecognized parameter is a hard API error there), so the
-        result key for group membership is ``"groups"`` on Zabbix < 6.4 and
-        ``"hostgroups"`` on >= 6.4 -- callers must check both.
+        ``selectGroups`` to ``selectHostGroups`` (the old name is deprecated
+        from 6.4 on, though still accepted as of 7.0), so the result key for
+        group membership is ``"groups"`` on Zabbix < 6.4 and ``"hostgroups"``
+        on >= 6.4 -- callers must check both.
+
+        Rows are returned in whatever order ``maintenance.get`` gives back
+        (no ``sortfield`` is requested: ``active_since``/``active_till`` are
+        only valid sort fields on Zabbix >= 7.0, and this library also
+        supports older versions -- sort client-side if order matters).
 
         ``active_since``/``active_till`` and the ``timeperiods`` entries carry
         epoch seconds as Zabbix-flavored strings, not ints.
@@ -349,8 +354,6 @@ class ZapiClient:
             groups_key: ["groupid", "name"],
             "selectTimeperiods": "extend",
             "selectTags": "extend",
-            "sortfield": "active_since",
-            "sortorder": "ASC",
         }
         return self._call("maintenance.get", params)
 

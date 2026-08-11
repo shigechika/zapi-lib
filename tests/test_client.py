@@ -205,10 +205,13 @@ def test_get_maintenances_returns_raw_rows():
         assert result == [SAMPLE_MAINTENANCE]
 
 
-def test_get_maintenances_requests_selects_and_sort():
+def test_get_maintenances_requests_selects_without_sortfield():
     # Dropping any of these selects silently degrades the MCP-side display
     # (e.g. no host list, no time periods) without the API call itself
-    # failing -- assert the request shape directly.
+    # failing -- assert the request shape directly. No sortfield/sortorder:
+    # maintenance.get only accepts active_since/active_till as sort fields on
+    # Zabbix >= 7.0, and this library also supports older versions (/code-review
+    # PR#30 finding -- sending it unconditionally breaks every version < 7.0).
     r = make_router(results={"maintenance.get": [SAMPLE_MAINTENANCE]})
     with r:
         c = ZapiClient("https://zabbix.example.com", "u", "p")
@@ -219,8 +222,8 @@ def test_get_maintenances_requests_selects_and_sort():
         assert params["selectHosts"] == ["hostid", "host", "name"]
         assert params["selectTimeperiods"] == "extend"
         assert params["selectTags"] == "extend"
-        assert params["sortfield"] == "active_since"
-        assert params["sortorder"] == "ASC"
+        assert "sortfield" not in params
+        assert "sortorder" not in params
 
 
 def test_get_maintenances_uses_selectgroups_below_6_4():
