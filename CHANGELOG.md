@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/shigechika/zapi-lib/compare/v0.5.1...v0.6.0) (2026-08-11)
+
+
+### Features
+
+* add get_maintenances read helper ([#30](https://github.com/shigechika/zapi-lib/issues/30)) ([d543aee](https://github.com/shigechika/zapi-lib/commit/d543aeed630354dcae6d3a346e93c83d41a174a9))
+
 ## [0.5.1](https://github.com/shigechika/zapi-lib/compare/v0.5.0...v0.5.1) (2026-08-10)
 
 
