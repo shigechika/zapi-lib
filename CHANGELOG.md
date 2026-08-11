@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/shigechika/zapi-lib/compare/v0.6.0...v0.6.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* add explicit workflow permissions to ci.yml and release.yml ([#32](https://github.com/shigechika/zapi-lib/issues/32)) ([23c5f05](https://github.com/shigechika/zapi-lib/commit/23c5f055a4f50793f7f237c2bc35ac6776d12db7))
+
 ## [0.6.0](https://github.com/shigechika/zapi-lib/compare/v0.5.1...v0.6.0) (2026-08-11)
 
 
