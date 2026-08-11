@@ -11,7 +11,8 @@ can depend on it without pulling in the MCP server stack (`mcp`, `starlette`, `u
 
 - **Version-adaptive auth**: `user` + `auth` field (Zabbix ≤ 6.2) and
   `username` + `Authorization: Bearer` (6.4 / 7.0), degrading to the proven path automatically.
-- **Read helpers**: `get_hosts`, `get_items`, `get_problems`, `count_problems`, `get_events`.
+- **Read helpers**: `get_hosts`, `get_items`, `get_problems`, `count_problems`, `get_events`,
+  `get_maintenances`.
 - **Write helpers**: `set_host_tag` (idempotent host-tag upsert that preserves other tags),
   `acknowledge_problem`, `set_maintenance` / `set_maintenance_for_hosts` (idempotent
   maintenance windows, by `location` tag or by exact host name).
@@ -44,7 +45,9 @@ maintenance window over hosts carrying a matching `location` tag;
 `set_maintenance_for_hosts(hosts, since, till, name, description)` does the same over an
 explicit list of exact host (technical) names instead, for when the affected hosts don't
 share a tag or precise host-level control is wanted. Both are plain `ZapiClient` methods —
-no provisioning config required.
+no provisioning config required. `get_maintenances()` reads all maintenance windows back
+(hosts, host groups, time periods, tags) as raw API rows; deciding whether a given window
+is currently active is left to the caller.
 
 ### Provisioning (config-driven)
 

@@ -322,6 +322,42 @@ class ZapiClient:
         return self._call("event.get", params)
 
     # ------------------------------------------------------------------
+    # Maintenance (read)
+    # ------------------------------------------------------------------
+    def get_maintenances(self) -> list[dict]:
+        """Return all maintenance windows with hosts, host groups, time periods, and tags.
+
+        Returns raw rows, including expired windows: classifying a window as
+        active/upcoming/expired depends on "now", which this library doesn't
+        track, so that judgment is left to the caller -- matching the
+        get_hosts/get_problems/get_events convention of returning unfiltered
+        API rows rather than pre-interpreting them.
+
+        The host-group selector is version-gated: Zabbix 6.4 renamed
+        ``selectGroups`` to ``selectHostGroups`` (the old name is deprecated
+        from 6.4 on, though still accepted as of 7.0), so the result key for
+        group membership is ``"groups"`` on Zabbix < 6.4 and ``"hostgroups"``
+        on >= 6.4 -- callers must check both.
+
+        Rows are returned in whatever order ``maintenance.get`` gives back
+        (no ``sortfield`` is requested: ``active_since``/``active_till`` are
+        only valid sort fields on Zabbix >= 7.0, and this library also
+        supports older versions -- sort client-side if order matters).
+
+        ``active_since``/``active_till`` and the ``timeperiods`` entries carry
+        epoch seconds as Zabbix-flavored strings, not ints.
+        """
+        groups_key = "selectHostGroups" if self._version_tuple(self.version) >= (6, 4) else "selectGroups"
+        params: dict = {
+            "output": "extend",
+            "selectHosts": ["hostid", "host", "name"],
+            groups_key: ["groupid", "name"],
+            "selectTimeperiods": "extend",
+            "selectTags": "extend",
+        }
+        return self._call("maintenance.get", params)
+
+    # ------------------------------------------------------------------
     # Acknowledge
     # ------------------------------------------------------------------
     def acknowledge_problem(self, event_ids: list[str], message: str = "") -> dict:

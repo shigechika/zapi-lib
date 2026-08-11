@@ -25,7 +25,8 @@ no stdio/transport concerns, just an importable package.
     other param name only when the first failure is *not* a credential
     error — a genuine bad password is never retried, to avoid doubling
     lockout/audit pressure). Read helpers (`get_hosts`, `get_items`,
-    `get_problems`, `count_problems`, `get_events`, `get_group_id`,
+    `get_problems`, `count_problems`, `get_events`, `get_maintenances`,
+    `get_group_id`,
     `get_host_ids`/`get_host_ids_by_tag`/`get_item_ids`); write helpers
     (`set_host_tag`, `acknowledge_problem`, the group-creation path
     `create_group`/`ensure_group`, and `set_maintenance`/
@@ -36,8 +37,13 @@ no stdio/transport concerns, just an importable package.
     touches `host.get` even though the two selection modes must resolve
     hosts differently; deliberately moved here from `ZapiProvisioner` since
     neither needs provisioning config, and a caller with no provisioning
-    needs (e.g. zapi-mcp) still needs maintenance windows); and `call()` as
-    an escape hatch for JSON-RPC methods without a dedicated wrapper.
+    needs (e.g. zapi-mcp) still needs maintenance windows). `get_maintenances`
+    is the read counterpart: it returns raw `maintenance.get` rows (including
+    expired windows) and leaves active/upcoming/expired classification to the
+    caller, gating the host-group selector on API version since Zabbix 6.4
+    renamed `selectGroups` to `selectHostGroups` and 7.0 removed the old name
+    (an unrecognized parameter is a hard error there). `call()` is the
+    escape hatch for JSON-RPC methods without a dedicated wrapper.
     Construction itself hits the network (`apiinfo.version` + `user.login`)
     and closes the httpx client if that raises (since `__enter__`/`__exit__`
     never run for a failed constructor).

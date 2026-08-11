@@ -122,3 +122,15 @@ SAMPLE_ITEM = {
     "lastclock": "1700000000",
     "tags": [],
 }
+
+SAMPLE_MAINTENANCE = {
+    "maintenanceid": "900",
+    "name": "MW-2606011000h",
+    "active_since": "1780000000",
+    "active_till": "1780028800",
+    "maintenance_type": "0",
+    "description": "planned outage",
+    "hosts": [{"hostid": "100", "host": "pool-a", "name": "Pool A"}],
+    "timeperiods": [{"timeperiod_type": "0", "start_date": "1780000000", "period": "28800"}],
+    "tags": [{"tag": "location", "value": "example"}],
+}

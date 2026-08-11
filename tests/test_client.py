@@ -7,7 +7,7 @@ import httpx
 import pytest
 import respx
 
-from tests.conftest import ENDPOINT, SAMPLE_HOST, SAMPLE_ITEM, SAMPLE_PROBLEM, make_router
+from tests.conftest import ENDPOINT, SAMPLE_HOST, SAMPLE_ITEM, SAMPLE_MAINTENANCE, SAMPLE_PROBLEM, make_router
 from zapi_lib.client import ZapiAuthError, ZapiClient, ZapiError, ZapiProvisioner, tag_filter
 
 # ---- URL normalization ----------------------------------------------------
@@ -189,6 +189,65 @@ def test_problem_get_sortfield_is_eventid_only():
         c.get_problems()
         call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "problem.get")
         assert call["params"]["sortfield"] == "eventid"
+
+
+# ---- get_maintenances (read) -----------------------------------------------
+
+
+def test_get_maintenances_returns_raw_rows():
+    # get_maintenances must return API rows unfiltered/unformatted -- including
+    # expired windows -- matching the get_hosts/get_problems/get_events
+    # convention that interpretation is the caller's job, not this library's.
+    r = make_router(results={"maintenance.get": [SAMPLE_MAINTENANCE]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        result = c.get_maintenances()
+        assert result == [SAMPLE_MAINTENANCE]
+
+
+def test_get_maintenances_requests_selects_without_sortfield():
+    # Dropping any of these selects silently degrades the MCP-side display
+    # (e.g. no host list, no time periods) without the API call itself
+    # failing -- assert the request shape directly. No sortfield/sortorder:
+    # maintenance.get only accepts active_since/active_till as sort fields on
+    # Zabbix >= 7.0, and this library also supports older versions (/code-review
+    # PR#30 finding -- sending it unconditionally breaks every version < 7.0).
+    r = make_router(results={"maintenance.get": [SAMPLE_MAINTENANCE]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        c.get_maintenances()
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.get")
+        params = call["params"]
+        assert params["output"] == "extend"
+        assert params["selectHosts"] == ["hostid", "host", "name"]
+        assert params["selectTimeperiods"] == "extend"
+        assert params["selectTags"] == "extend"
+        assert "sortfield" not in params
+        assert "sortorder" not in params
+
+
+def test_get_maintenances_uses_selectgroups_below_6_4():
+    # Zabbix < 6.4 doesn't recognize selectHostGroups; sending it there is a
+    # silent no-op at best, so pre-6.4 must use the old selectGroups name.
+    r = make_router(version="6.0.0", results={"maintenance.get": [SAMPLE_MAINTENANCE]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        c.get_maintenances()
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.get")
+        assert call["params"]["selectGroups"] == ["groupid", "name"]
+        assert "selectHostGroups" not in call["params"]
+
+
+def test_get_maintenances_uses_selecthostgroups_on_6_4_plus():
+    # Zabbix 7.0 removed selectGroups entirely -- sending it there is a hard
+    # API error, so this is the generation the version gate exists to protect.
+    r = make_router(version="7.0.0", results={"maintenance.get": [SAMPLE_MAINTENANCE]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        c.get_maintenances()
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.get")
+        assert call["params"]["selectHostGroups"] == ["groupid", "name"]
+        assert "selectGroups" not in call["params"]
 
 
 def test_acknowledge_with_message_sets_message_bit():
