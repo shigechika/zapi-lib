@@ -93,4 +93,6 @@ reviewer also receives.
   build on. Both gate this repository, so restating one costs a round
   trip and no information. Note this is only about *restating* an
   enforced finding: unlike some sibling repositories, formatting here
-  is genuinely enforced rather than opted out of.
+  is genuinely enforced rather than opted out of. It never applies to a
+  rule listed under **Always blocking** above, even if a lint rule
+  happens to fire on the same line.
