@@ -35,7 +35,12 @@ no stdio/transport concerns, just an importable package.
     `_create_maintenance_window` helper that takes a *lazy* hostid-resolver
     callable so a repeat call against an already-existing window never
     touches `host.get` even though the two selection modes must resolve
-    hosts differently; deliberately moved here from `ZapiProvisioner` since
+    hosts differently; a keyword-only `overwrite=False` turns the
+    already-exists branch from "leave it alone" into `maintenance.update`
+    (last write wins) for callers whose window name is generated from the
+    event itself — kept opt-in because the idempotency key is name+start and
+    excludes the target, so overwriting a free-text-named window could
+    reschedule an unrelated maintenance; deliberately moved here from `ZapiProvisioner` since
     neither needs provisioning config, and a caller with no provisioning
     needs (e.g. zapi-mcp) still needs maintenance windows). `get_maintenances`
     is the read counterpart: it returns raw `maintenance.get` rows (including

@@ -443,6 +443,7 @@ class ZapiClient:
         description: str,
         *,
         tags: list[dict] | None = None,
+        overwrite: bool = False,
     ) -> list[str]:
         """Shared idempotent maintenance-window creation.
 
@@ -451,9 +452,35 @@ class ZapiClient:
         timezone (``time.mktime``), not a fixed zone. Callers running outside
         JST (or wanting a specific zone regardless of the host's) must convert
         before calling.
-        The window name is ``name`` + the start time (``%y%m%d%H%M``); an
-        existing window with that name is left untouched (idempotent) and its
-        ids are returned, WITHOUT ever calling ``resolve_hostids`` -- host
+        The window name is ``name`` + the start time (``%y%m%d%H%M``). When a
+        window with that name already exists, ``overwrite`` decides what
+        happens:
+
+        - ``overwrite=False`` (default): leave it untouched and return its
+          ids. Callers keep the historical idempotent behaviour.
+        - ``overwrite=True``: treat the call as a *correction* of the same
+          planned outage and update ``active_since``/``active_till``/
+          ``timeperiods``/``description`` in place (last write wins).
+
+        Only turn ``overwrite`` on where ``name`` + ``since`` provably
+        identifies one real-world event, because a collision then means "the
+        same outage, re-announced". That holds for a machine-generated name
+        derived from a site and its start time; it does NOT hold for a
+        free-text name chosen per call, where two unrelated maintenances can
+        share a name and overwriting would silently reschedule someone
+        else's window (see the target-not-in-key caveat in
+        ``set_maintenance``).
+
+        ``hostids`` is deliberately NOT sent on update: Zabbix leaves
+        properties that are omitted from ``maintenance.update`` unchanged, so
+        the existing host assignment survives and the lazy host resolution
+        below still holds (a caller that can ``maintenance.*`` but not
+        ``host.get`` can still correct the schedule). It also means an
+        overwrite never re-targets a window -- the times move, the hosts do
+        not.
+
+        In either mode the ids are returned WITHOUT ever calling
+        ``resolve_hostids`` -- host
         resolution is deliberately lazy (a callable, not an already-resolved
         list) so a repeated call against an existing window still
         short-circuits before touching host.get/host-tag lookups, matching
@@ -481,23 +508,53 @@ class ZapiClient:
         mode_suffix = "" if tags is not None else "h"
         maint_name = name + since_dt.strftime("%y%m%d%H%M") + mode_suffix
 
-        existing = self._call("maintenance.get", {"filter": {"name": maint_name}, "output": ["maintenanceid"]})
+        since_epoch = int(time.mktime(since_dt.timetuple()))
+        till_epoch = int(time.mktime(till_dt.timetuple()))
+        timeperiods = [{"start_date": since_epoch, "period": int((till_dt - since_dt).total_seconds())}]
+
+        existing = self._call(
+            "maintenance.get",
+            {"filter": {"name": maint_name}, "output": ["maintenanceid", "active_since", "active_till"]},
+        )
         if existing:
-            self.logger.info("maintenance already exists, skipping: %s", maint_name)
-            return [e["maintenanceid"] for e in existing]
+            ids = [e["maintenanceid"] for e in existing]
+            if not overwrite:
+                self.logger.info("maintenance already exists, skipping: %s", maint_name)
+                return ids
+            for row in existing:
+                # Compare against what Zabbix actually stores (epoch seconds as
+                # strings) so a pure re-run issues no write at all -- re-running
+                # the caller must stay a no-op even with overwrite on.
+                if int(row["active_since"]) == since_epoch and int(row["active_till"]) == till_epoch:
+                    self.logger.info("maintenance unchanged: %s", maint_name)
+                    continue
+                self.logger.info(
+                    "maintenance updated: %s  active_since %s->%s  active_till %s->%s",
+                    maint_name,
+                    row["active_since"],
+                    since_epoch,
+                    row["active_till"],
+                    till_epoch,
+                )
+                self._call(
+                    "maintenance.update",
+                    {
+                        "maintenanceid": row["maintenanceid"],
+                        "active_since": since_epoch,
+                        "active_till": till_epoch,
+                        "timeperiods": timeperiods,
+                        "description": description,
+                    },
+                )
+            return ids
 
         payload = {
-            "active_since": int(time.mktime(since_dt.timetuple())),
-            "active_till": int(time.mktime(till_dt.timetuple())),
+            "active_since": since_epoch,
+            "active_till": till_epoch,
             "name": maint_name,
             "description": description,
             "hostids": resolve_hostids(),
-            "timeperiods": [
-                {
-                    "start_date": int(time.mktime(since_dt.timetuple())),
-                    "period": int((till_dt - since_dt).total_seconds()),
-                }
-            ],
+            "timeperiods": timeperiods,
         }
         if tags is not None:
             payload["tags_evaltype"] = 0
@@ -505,13 +562,33 @@ class ZapiClient:
         result = self._call("maintenance.create", payload)
         return result["maintenanceids"]
 
-    def set_maintenance(self, location: str, since: str, till: str, name: str, description: str) -> list[str]:
+    def set_maintenance(
+        self,
+        location: str,
+        since: str,
+        till: str,
+        name: str,
+        description: str,
+        *,
+        overwrite: bool = False,
+    ) -> list[str]:
         """Create a maintenance window covering hosts with a matching ``location`` tag.
 
         See ``_create_maintenance_window`` for the ``since``/``till``/idempotency
-        contract. Signature is fixed (positional, ``location`` first) for
-        backward compatibility with existing callers (e.g. ``nuwan-exec.py``);
-        use ``set_maintenance_for_hosts`` for explicit-hostname selection.
+        contract. The positional part of the signature is fixed (``location``
+        first) for backward compatibility with existing callers (e.g.
+        ``nuwan-exec.py``); use ``set_maintenance_for_hosts`` for
+        explicit-hostname selection.
+
+        ``overwrite`` is keyword-only and defaults to False, so existing
+        callers keep the idempotent no-op behaviour. Note the idempotency key
+        is ``name`` + ``since`` and does NOT include the target: two calls
+        with the same name/since but different ``location`` collide. With
+        ``overwrite=False`` the second call silently protects nothing; with
+        ``overwrite=True`` it additionally reschedules the first window while
+        still not protecting the new target. Only pass ``overwrite=True``
+        when ``name`` is generated from the event itself, so a collision can
+        only mean "same outage, re-announced".
         """
         return self._create_maintenance_window(
             lambda: self.get_host_ids_by_tag("location", location),
@@ -520,6 +597,7 @@ class ZapiClient:
             name,
             description,
             tags=[{"tag": "location", "operator": "0", "value": location}],
+            overwrite=overwrite,
         )
 
     def _resolve_hostids_by_name(self, hosts: list[str]) -> list[str]:
@@ -549,7 +627,14 @@ class ZapiClient:
         return sorted(set(found.values()))
 
     def set_maintenance_for_hosts(
-        self, hosts: list[str], since: str, till: str, name: str, description: str
+        self,
+        hosts: list[str],
+        since: str,
+        till: str,
+        name: str,
+        description: str,
+        *,
+        overwrite: bool = False,
     ) -> list[str]:
         """Create a maintenance window covering explicit hosts by exact technical name.
 
@@ -569,7 +654,12 @@ class ZapiClient:
         if not hosts:
             raise ZapiError("set_maintenance_for_hosts requires at least one host name")
         return self._create_maintenance_window(
-            lambda: self._resolve_hostids_by_name(hosts), since, till, name, description
+            lambda: self._resolve_hostids_by_name(hosts),
+            since,
+            till,
+            name,
+            description,
+            overwrite=overwrite,
         )
 
 

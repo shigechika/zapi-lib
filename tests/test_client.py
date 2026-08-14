@@ -2,6 +2,8 @@
 
 import json
 import logging
+import time
+from datetime import datetime
 
 import httpx
 import pytest
@@ -714,6 +716,113 @@ def test_set_maintenance_creates_with_name_period_and_hosts():
         assert call["params"]["timeperiods"][0]["period"] == 7200  # 2h in seconds
         assert call["params"]["tags"] == [{"tag": "location", "operator": "0", "value": "tokyo"}]
         assert call["params"]["hostids"] == ["1", "2"]
+
+
+def _epoch(text: str) -> int:
+    # Mirror the client's own naive-local-time conversion so these tests do not
+    # depend on the machine's timezone.
+    return int(time.mktime(datetime.strptime(text, "%Y/%m/%d %H:%M:%S").timetuple()))
+
+
+def test_set_maintenance_overwrite_updates_existing_window():
+    # The reason overwrite exists: a planned outage announced twice (the second
+    # announcement extending the end time) produced the same name+since, so the
+    # correction was silently dropped and monitoring un-suppressed itself at the
+    # ORIGINAL end time. With overwrite the later call must move active_till.
+    r = make_router(
+        results={
+            "maintenance.get": [
+                {
+                    "maintenanceid": "555",
+                    "active_since": str(_epoch("2025/01/01 00:00:00")),
+                    "active_till": str(_epoch("2025/01/01 01:00:00")),
+                }
+            ]
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/05 17:00:00", "MW-", "desc", overwrite=True)
+        assert result == ["555"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.update")
+        assert call["params"]["maintenanceid"] == "555"
+        assert call["params"]["active_till"] == _epoch("2025/01/05 17:00:00")
+        assert call["params"]["timeperiods"][0]["period"] == 4 * 24 * 3600 + 17 * 3600
+        # hostids must NOT be sent: Zabbix leaves omitted properties untouched,
+        # so the existing target survives and an overwrite can never re-target a
+        # window (it also keeps the update usable without host.get).
+        assert "hostids" not in call["params"]
+        assert not any(x["payload"]["method"] == "maintenance.create" for x in r.captured)
+
+
+def test_set_maintenance_overwrite_is_noop_when_values_match():
+    # Re-running the caller must stay free of writes even with overwrite on --
+    # nuwan-exec.py re-processes the same spreadsheet row every hour.
+    r = make_router(
+        results={
+            "maintenance.get": [
+                {
+                    "maintenanceid": "555",
+                    "active_since": str(_epoch("2025/01/01 00:00:00")),
+                    "active_till": str(_epoch("2025/01/01 01:00:00")),
+                }
+            ]
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc", overwrite=True)
+        assert result == ["555"]
+        assert not any(x["payload"]["method"] == "maintenance.update" for x in r.captured)
+        # Lazy host resolution has to survive the overwrite path too.
+        assert not any(x["payload"]["method"] == "host.get" for x in r.captured)
+
+
+def test_set_maintenance_does_not_overwrite_by_default():
+    # overwrite is opt-in on purpose: name+since does not include the target, so
+    # for a free-text name two unrelated maintenances can collide and silently
+    # rescheduling the first one would be worse than doing nothing.
+    r = make_router(
+        results={
+            "maintenance.get": [
+                {
+                    "maintenanceid": "555",
+                    "active_since": str(_epoch("2025/01/01 00:00:00")),
+                    "active_till": str(_epoch("2025/01/01 01:00:00")),
+                }
+            ]
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/09 09:00:00", "MW-", "desc")
+        assert result == ["555"]
+        assert not any(x["payload"]["method"] == "maintenance.update" for x in r.captured)
+
+
+def test_set_maintenance_for_hosts_supports_overwrite():
+    # Both selection modes must offer the same contract; otherwise callers pick
+    # the mode by which one happens to honour corrections.
+    r = make_router(
+        results={
+            "maintenance.get": [
+                {
+                    "maintenanceid": "556",
+                    "active_since": str(_epoch("2025/01/01 00:00:00")),
+                    "active_till": str(_epoch("2025/01/01 01:00:00")),
+                }
+            ]
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance_for_hosts(
+            ["h1"], "2025/01/01 00:00:00", "2025/01/02 00:00:00", "MW-", "desc", overwrite=True
+        )
+        assert result == ["556"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.update")
+        assert call["params"]["active_till"] == _epoch("2025/01/02 00:00:00")
+        assert not any(x["payload"]["method"] == "host.get" for x in r.captured)
 
 
 def test_set_maintenance_is_idempotent_when_window_exists():

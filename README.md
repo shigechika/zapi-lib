@@ -45,7 +45,21 @@ maintenance window over hosts carrying a matching `location` tag;
 `set_maintenance_for_hosts(hosts, since, till, name, description)` does the same over an
 explicit list of exact host (technical) names instead, for when the affected hosts don't
 share a tag or precise host-level control is wanted. Both are plain `ZapiClient` methods —
-no provisioning config required. `get_maintenances()` reads all maintenance windows back
+no provisioning config required.
+
+Both accept a keyword-only `overwrite=False`. The window name is `name` + the start time,
+so re-announcing the *same* planned outage with a corrected end time collides with the
+window already created for it. By default that collision is a no-op (the historical
+idempotent behaviour) and the correction is silently dropped. Pass `overwrite=True` to
+treat the collision as a correction and update `active_since`/`active_till`/`timeperiods`/
+`description` in place instead. `hostids` is never sent on update, so an overwrite moves
+the schedule but never re-targets the window, and a repeat call with identical values still
+issues no write at all.
+
+Only enable it where `name` + start time provably identifies one real-world event — a name
+generated from a site and its start time qualifies; a free-text name chosen per call does
+not, because two unrelated maintenances can then share a name and overwriting would
+silently reschedule someone else's window. `get_maintenances()` reads all maintenance windows back
 (hosts, host groups, time periods, tags) as raw API rows; deciding whether a given window
 is currently active is left to the caller.
 

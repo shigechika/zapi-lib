@@ -28,6 +28,7 @@ DEFAULT_RESULTS: dict[str, object] = {
     "event.acknowledge": {"eventids": ["1"]},
     "maintenance.get": [],
     "maintenance.create": {"maintenanceids": ["900"]},
+    "maintenance.update": {"maintenanceids": ["900"]},
 }
 
 
