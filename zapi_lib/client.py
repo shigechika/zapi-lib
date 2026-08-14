@@ -41,6 +41,22 @@ def tag_filter(tag: str, value: str | None = None) -> dict:
     return {"tag": tag, "operator": TAG_OP_EXISTS}
 
 
+def _epoch_or_none(value: object) -> int | None:
+    """Coerce a Zabbix epoch field to int, or None when it can't be read.
+
+    Zabbix returns epoch seconds as strings. Returning None instead of raising
+    keeps a malformed or absent field from escaping a public method as a raw
+    KeyError/ValueError; callers treat None as "not equal", which errs toward
+    writing the value the caller asked for.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class ZapiClient:
     """Minimal Zabbix API client using JSON-RPC over a single endpoint."""
 
@@ -514,7 +530,10 @@ class ZapiClient:
 
         existing = self._call(
             "maintenance.get",
-            {"filter": {"name": maint_name}, "output": ["maintenanceid", "active_since", "active_till"]},
+            {
+                "filter": {"name": maint_name},
+                "output": ["maintenanceid", "active_since", "active_till", "description"],
+            },
         )
         if existing:
             ids = [e["maintenanceid"] for e in existing]
@@ -522,18 +541,33 @@ class ZapiClient:
                 self.logger.info("maintenance already exists, skipping: %s", maint_name)
                 return ids
             for row in existing:
+                # Compare every field the update would write -- description
+                # included. Skipping a description-only correction would
+                # reproduce, inside the overwrite path, the exact silent-drop
+                # this option exists to fix.
+                #
                 # Compare against what Zabbix actually stores (epoch seconds as
                 # strings) so a pure re-run issues no write at all -- re-running
-                # the caller must stay a no-op even with overwrite on.
-                if int(row["active_since"]) == since_epoch and int(row["active_till"]) == till_epoch:
+                # the caller must stay a no-op even with overwrite on. An
+                # unreadable stored value (missing key, non-numeric) must not
+                # escape as a raw KeyError/ValueError from a public method, and
+                # "cannot confirm it already matches" is treated as "differs":
+                # applying the correction is the safe direction, since the whole
+                # point of the call is to make the window say what the caller
+                # asked for.
+                if (
+                    _epoch_or_none(row.get("active_since")) == since_epoch
+                    and _epoch_or_none(row.get("active_till")) == till_epoch
+                    and row.get("description") == description
+                ):
                     self.logger.info("maintenance unchanged: %s", maint_name)
                     continue
                 self.logger.info(
                     "maintenance updated: %s  active_since %s->%s  active_till %s->%s",
                     maint_name,
-                    row["active_since"],
+                    row.get("active_since"),
                     since_epoch,
-                    row["active_till"],
+                    row.get("active_till"),
                     till_epoch,
                 )
                 self._call(

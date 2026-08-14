@@ -736,6 +736,7 @@ def test_set_maintenance_overwrite_updates_existing_window():
                     "maintenanceid": "555",
                     "active_since": str(_epoch("2025/01/01 00:00:00")),
                     "active_till": str(_epoch("2025/01/01 01:00:00")),
+                    "description": "desc",
                 }
             ]
         }
@@ -765,6 +766,7 @@ def test_set_maintenance_overwrite_is_noop_when_values_match():
                     "maintenanceid": "555",
                     "active_since": str(_epoch("2025/01/01 00:00:00")),
                     "active_till": str(_epoch("2025/01/01 01:00:00")),
+                    "description": "desc",
                 }
             ]
         }
@@ -778,6 +780,64 @@ def test_set_maintenance_overwrite_is_noop_when_values_match():
         assert not any(x["payload"]["method"] == "host.get" for x in r.captured)
 
 
+def test_set_maintenance_overwrite_applies_description_only_correction():
+    # The unchanged-check must cover every field the update writes. Comparing
+    # only the times would reproduce, inside the overwrite path, the same silent
+    # drop of a correction that overwrite exists to fix.
+    r = make_router(
+        results={
+            "maintenance.get": [
+                {
+                    "maintenanceid": "555",
+                    "active_since": str(_epoch("2025/01/01 00:00:00")),
+                    "active_till": str(_epoch("2025/01/01 01:00:00")),
+                    "description": "old reason",
+                }
+            ]
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "new reason", overwrite=True)
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.update")
+        assert call["params"]["description"] == "new reason"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        # active_till absent entirely (e.g. a narrower output selection)
+        {"maintenanceid": "555", "active_since": "1735657200", "description": "desc"},
+        # non-numeric stored value
+        {
+            "maintenanceid": "555",
+            "active_since": "1735657200",
+            "active_till": "unknown",
+            "description": "desc",
+        },
+        # explicit null
+        {
+            "maintenanceid": "555",
+            "active_since": None,
+            "active_till": "1735660800",
+            "description": "desc",
+        },
+    ],
+    ids=["missing", "non-numeric", "null"],
+)
+def test_set_maintenance_overwrite_survives_unreadable_stored_times(row):
+    # A missing or non-numeric stored epoch must not escape a public method as a
+    # raw KeyError/ValueError. "Cannot confirm it matches" is treated as
+    # "differs", so the caller's requested values still get written.
+    r = make_router(results={"maintenance.get": [row]})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        result = z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc", overwrite=True)
+        assert result == ["555"]
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.update")
+        assert call["params"]["active_till"] == _epoch("2025/01/01 01:00:00")
+
+
 def test_set_maintenance_does_not_overwrite_by_default():
     # overwrite is opt-in on purpose: name+since does not include the target, so
     # for a free-text name two unrelated maintenances can collide and silently
@@ -789,6 +849,7 @@ def test_set_maintenance_does_not_overwrite_by_default():
                     "maintenanceid": "555",
                     "active_since": str(_epoch("2025/01/01 00:00:00")),
                     "active_till": str(_epoch("2025/01/01 01:00:00")),
+                    "description": "desc",
                 }
             ]
         }
@@ -810,6 +871,7 @@ def test_set_maintenance_for_hosts_supports_overwrite():
                     "maintenanceid": "556",
                     "active_since": str(_epoch("2025/01/01 00:00:00")),
                     "active_till": str(_epoch("2025/01/01 01:00:00")),
+                    "description": "desc",
                 }
             ]
         }
