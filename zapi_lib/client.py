@@ -41,6 +41,43 @@ def tag_filter(tag: str, value: str | None = None) -> dict:
     return {"tag": tag, "operator": TAG_OP_EXISTS}
 
 
+def _timeperiod_matches(rows: object, start_date: int, period: int) -> bool:
+    """True when the stored schedule is exactly the single one-time period we'd write.
+
+    The outer ``active_since``/``active_till`` frame is only a bound; what
+    actually suppresses alerts is the time period inside it. A window whose
+    bounds match but whose period was edited by hand would otherwise be treated
+    as unchanged, leaving suppression on the stale schedule. Anything we can't
+    read as that exact single period counts as a mismatch, which errs toward
+    writing the caller's requested schedule.
+    """
+    if not isinstance(rows, list) or len(rows) != 1:
+        return False
+    row = rows[0]
+    if not isinstance(row, dict):
+        return False
+    # timeperiod_type 0 == one-time, the only kind this helper creates.
+    if str(row.get("timeperiod_type", "0")) != "0":
+        return False
+    return _epoch_or_none(row.get("start_date")) == start_date and _epoch_or_none(row.get("period")) == period
+
+
+def _epoch_or_none(value: object) -> int | None:
+    """Coerce a Zabbix epoch field to int, or None when it can't be read.
+
+    Zabbix returns epoch seconds as strings. Returning None instead of raising
+    keeps a malformed or absent field from escaping a public method as a raw
+    KeyError/ValueError; callers treat None as "not equal", which errs toward
+    writing the value the caller asked for.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class ZapiClient:
     """Minimal Zabbix API client using JSON-RPC over a single endpoint."""
 
@@ -443,6 +480,7 @@ class ZapiClient:
         description: str,
         *,
         tags: list[dict] | None = None,
+        overwrite: bool = False,
     ) -> list[str]:
         """Shared idempotent maintenance-window creation.
 
@@ -451,9 +489,35 @@ class ZapiClient:
         timezone (``time.mktime``), not a fixed zone. Callers running outside
         JST (or wanting a specific zone regardless of the host's) must convert
         before calling.
-        The window name is ``name`` + the start time (``%y%m%d%H%M``); an
-        existing window with that name is left untouched (idempotent) and its
-        ids are returned, WITHOUT ever calling ``resolve_hostids`` -- host
+        The window name is ``name`` + the start time (``%y%m%d%H%M``). When a
+        window with that name already exists, ``overwrite`` decides what
+        happens:
+
+        - ``overwrite=False`` (default): leave it untouched and return its
+          ids. Callers keep the historical idempotent behaviour.
+        - ``overwrite=True``: treat the call as a *correction* of the same
+          planned outage and update ``active_since``/``active_till``/
+          ``timeperiods``/``description`` in place (last write wins).
+
+        Only turn ``overwrite`` on where ``name`` + ``since`` provably
+        identifies one real-world event, because a collision then means "the
+        same outage, re-announced". That holds for a machine-generated name
+        derived from a site and its start time; it does NOT hold for a
+        free-text name chosen per call, where two unrelated maintenances can
+        share a name and overwriting would silently reschedule someone
+        else's window (see the target-not-in-key caveat in
+        ``set_maintenance``).
+
+        ``hostids`` is deliberately NOT sent on update: Zabbix leaves
+        properties that are omitted from ``maintenance.update`` unchanged, so
+        the existing host assignment survives and the lazy host resolution
+        below still holds (a caller that can ``maintenance.*`` but not
+        ``host.get`` can still correct the schedule). It also means an
+        overwrite never re-targets a window -- the times move, the hosts do
+        not.
+
+        In either mode the ids are returned WITHOUT ever calling
+        ``resolve_hostids`` -- host
         resolution is deliberately lazy (a callable, not an already-resolved
         list) so a repeated call against an existing window still
         short-circuits before touching host.get/host-tag lookups, matching
@@ -481,23 +545,80 @@ class ZapiClient:
         mode_suffix = "" if tags is not None else "h"
         maint_name = name + since_dt.strftime("%y%m%d%H%M") + mode_suffix
 
-        existing = self._call("maintenance.get", {"filter": {"name": maint_name}, "output": ["maintenanceid"]})
+        # Zabbix stores active_since/active_till/start_date/period floored to
+        # whole minutes. Floor here too, so what we write is what we later read
+        # back and compare against -- otherwise a seconds-bearing timestamp
+        # (e.g. "... 10:30:30") never matches its own stored value and every
+        # overwrite call would issue a pointless maintenance.update, defeating
+        # the no-op-on-repeat guarantee for timer-driven callers.
+        since_epoch = int(time.mktime(since_dt.timetuple())) // 60 * 60
+        till_epoch = int(time.mktime(till_dt.timetuple())) // 60 * 60
+        timeperiods = [{"start_date": since_epoch, "period": till_epoch - since_epoch}]
+
+        existing = self._call(
+            "maintenance.get",
+            {
+                "filter": {"name": maint_name},
+                "output": ["maintenanceid", "active_since", "active_till", "description"],
+                "selectTimeperiods": "extend",
+            },
+        )
         if existing:
-            self.logger.info("maintenance already exists, skipping: %s", maint_name)
-            return [e["maintenanceid"] for e in existing]
+            ids = [e["maintenanceid"] for e in existing]
+            if not overwrite:
+                self.logger.info("maintenance already exists, skipping: %s", maint_name)
+                return ids
+            for row in existing:
+                # Compare every field the update would write -- description and
+                # the time period included. The period is the part that actually
+                # suppresses alerts; the outer bounds are only a frame. Skipping a description-only correction would
+                # reproduce, inside the overwrite path, the exact silent-drop
+                # this option exists to fix.
+                #
+                # Compare against what Zabbix actually stores (epoch seconds as
+                # strings) so a pure re-run issues no write at all -- re-running
+                # the caller must stay a no-op even with overwrite on. An
+                # unreadable stored value (missing key, non-numeric) must not
+                # escape as a raw KeyError/ValueError from a public method, and
+                # "cannot confirm it already matches" is treated as "differs":
+                # applying the correction is the safe direction, since the whole
+                # point of the call is to make the window say what the caller
+                # asked for.
+                if (
+                    _epoch_or_none(row.get("active_since")) == since_epoch
+                    and _epoch_or_none(row.get("active_till")) == till_epoch
+                    and row.get("description") == description
+                    and _timeperiod_matches(row.get("timeperiods"), since_epoch, timeperiods[0]["period"])
+                ):
+                    self.logger.info("maintenance unchanged: %s", maint_name)
+                    continue
+                self.logger.info(
+                    "maintenance updated: %s  active_since %s->%s  active_till %s->%s",
+                    maint_name,
+                    row.get("active_since"),
+                    since_epoch,
+                    row.get("active_till"),
+                    till_epoch,
+                )
+                self._call(
+                    "maintenance.update",
+                    {
+                        "maintenanceid": row["maintenanceid"],
+                        "active_since": since_epoch,
+                        "active_till": till_epoch,
+                        "timeperiods": timeperiods,
+                        "description": description,
+                    },
+                )
+            return ids
 
         payload = {
-            "active_since": int(time.mktime(since_dt.timetuple())),
-            "active_till": int(time.mktime(till_dt.timetuple())),
+            "active_since": since_epoch,
+            "active_till": till_epoch,
             "name": maint_name,
             "description": description,
             "hostids": resolve_hostids(),
-            "timeperiods": [
-                {
-                    "start_date": int(time.mktime(since_dt.timetuple())),
-                    "period": int((till_dt - since_dt).total_seconds()),
-                }
-            ],
+            "timeperiods": timeperiods,
         }
         if tags is not None:
             payload["tags_evaltype"] = 0
@@ -505,13 +626,33 @@ class ZapiClient:
         result = self._call("maintenance.create", payload)
         return result["maintenanceids"]
 
-    def set_maintenance(self, location: str, since: str, till: str, name: str, description: str) -> list[str]:
+    def set_maintenance(
+        self,
+        location: str,
+        since: str,
+        till: str,
+        name: str,
+        description: str,
+        *,
+        overwrite: bool = False,
+    ) -> list[str]:
         """Create a maintenance window covering hosts with a matching ``location`` tag.
 
         See ``_create_maintenance_window`` for the ``since``/``till``/idempotency
-        contract. Signature is fixed (positional, ``location`` first) for
-        backward compatibility with existing callers (e.g. ``nuwan-exec.py``);
-        use ``set_maintenance_for_hosts`` for explicit-hostname selection.
+        contract. The positional part of the signature is fixed (``location``
+        first) for backward compatibility with existing callers (e.g.
+        ``nuwan-exec.py``); use ``set_maintenance_for_hosts`` for
+        explicit-hostname selection.
+
+        ``overwrite`` is keyword-only and defaults to False, so existing
+        callers keep the idempotent no-op behaviour. Note the idempotency key
+        is ``name`` + ``since`` and does NOT include the target: two calls
+        with the same name/since but different ``location`` collide. With
+        ``overwrite=False`` the second call silently protects nothing; with
+        ``overwrite=True`` it additionally reschedules the first window while
+        still not protecting the new target. Only pass ``overwrite=True``
+        when ``name`` is generated from the event itself, so a collision can
+        only mean "same outage, re-announced".
         """
         return self._create_maintenance_window(
             lambda: self.get_host_ids_by_tag("location", location),
@@ -520,6 +661,7 @@ class ZapiClient:
             name,
             description,
             tags=[{"tag": "location", "operator": "0", "value": location}],
+            overwrite=overwrite,
         )
 
     def _resolve_hostids_by_name(self, hosts: list[str]) -> list[str]:
@@ -549,7 +691,14 @@ class ZapiClient:
         return sorted(set(found.values()))
 
     def set_maintenance_for_hosts(
-        self, hosts: list[str], since: str, till: str, name: str, description: str
+        self,
+        hosts: list[str],
+        since: str,
+        till: str,
+        name: str,
+        description: str,
+        *,
+        overwrite: bool = False,
     ) -> list[str]:
         """Create a maintenance window covering explicit hosts by exact technical name.
 
@@ -569,7 +718,12 @@ class ZapiClient:
         if not hosts:
             raise ZapiError("set_maintenance_for_hosts requires at least one host name")
         return self._create_maintenance_window(
-            lambda: self._resolve_hostids_by_name(hosts), since, till, name, description
+            lambda: self._resolve_hostids_by_name(hosts),
+            since,
+            till,
+            name,
+            description,
+            overwrite=overwrite,
         )
 
 
