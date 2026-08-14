@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/shigechika/zapi-lib/compare/v0.6.1...v0.7.0) (2026-08-14)
+
+
+### Features
+
+* add opt-in overwrite for maintenance windows ([#35](https://github.com/shigechika/zapi-lib/issues/35)) ([5f4100f](https://github.com/shigechika/zapi-lib/commit/5f4100f718aea036943f4bba8e467c0392ba6e3b))
+
 ## [0.6.1](https://github.com/shigechika/zapi-lib/compare/v0.6.0...v0.6.1) (2026-08-11)
 
 
