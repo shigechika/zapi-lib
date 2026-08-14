@@ -56,6 +56,11 @@ treat the collision as a correction and update `active_since`/`active_till`/`tim
 the schedule but never re-targets the window, and a repeat call with identical values still
 issues no write at all.
 
+Note what `overwrite` does *not* cover: the start time is part of the window name, so a
+re-announcement that moves the **start** produces a different name, creates a second window,
+and leaves the earlier one in place. Two overlapping windows over-suppress rather than
+under-suppress, so it is the milder failure, but the stale window has to be removed by hand.
+
 Only enable it where `name` + start time provably identifies one real-world event — a name
 generated from a site and its start time qualifies; a free-text name chosen per call does
 not, because two unrelated maintenances can then share a name and overwriting would

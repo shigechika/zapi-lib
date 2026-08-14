@@ -876,6 +876,51 @@ def test_set_maintenance_overwrite_rewrites_stale_time_period():
         assert call["params"]["timeperiods"][0]["period"] == 3600
 
 
+def test_set_maintenance_overwrite_is_noop_with_seconds_bearing_times():
+    # Zabbix floors active_since/active_till/start_date/period to whole minutes.
+    # If we computed them unfloored, the stored (floored) value would never
+    # equal the computed one and every repeat call would issue a pointless
+    # maintenance.update -- exactly what the no-op guarantee promises not to do,
+    # and invisible to tests that only use minute-aligned times.
+    r = make_router(
+        results={
+            "maintenance.get": [
+                {
+                    "maintenanceid": "555",
+                    "active_since": str(_epoch("2025/01/01 00:00:00")),
+                    "active_till": str(_epoch("2025/01/01 01:00:00")),
+                    "description": "desc",
+                    "timeperiods": [
+                        {
+                            "timeperiod_type": "0",
+                            "start_date": str(_epoch("2025/01/01 00:00:00")),
+                            "period": "3600",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        # Seconds are present in the request but dropped by Zabbix on storage.
+        z.set_maintenance("tokyo", "2025/01/01 00:00:45", "2025/01/01 01:00:59", "MW-", "desc", overwrite=True)
+        assert not any(x["payload"]["method"] == "maintenance.update" for x in r.captured)
+
+
+def test_set_maintenance_floors_written_times_to_minutes():
+    # The created window must carry the same floored values, so the very first
+    # write already agrees with what Zabbix will store.
+    r = make_router(results={"maintenance.create": {"maintenanceids": ["999"]}, "host.get": []})
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        z.set_maintenance("tokyo", "2025/01/01 00:00:45", "2025/01/01 01:00:59", "MW-", "desc")
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.create")
+        assert call["params"]["active_since"] == _epoch("2025/01/01 00:00:00")
+        assert call["params"]["active_till"] == _epoch("2025/01/01 01:00:00")
+        assert call["params"]["timeperiods"][0]["period"] == 3600
+
+
 def test_set_maintenance_does_not_overwrite_by_default():
     # overwrite is opt-in on purpose: name+since does not include the target, so
     # for a free-text name two unrelated maintenances can collide and silently

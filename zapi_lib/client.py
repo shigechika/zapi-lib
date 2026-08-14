@@ -545,9 +545,15 @@ class ZapiClient:
         mode_suffix = "" if tags is not None else "h"
         maint_name = name + since_dt.strftime("%y%m%d%H%M") + mode_suffix
 
-        since_epoch = int(time.mktime(since_dt.timetuple()))
-        till_epoch = int(time.mktime(till_dt.timetuple()))
-        timeperiods = [{"start_date": since_epoch, "period": int((till_dt - since_dt).total_seconds())}]
+        # Zabbix stores active_since/active_till/start_date/period floored to
+        # whole minutes. Floor here too, so what we write is what we later read
+        # back and compare against -- otherwise a seconds-bearing timestamp
+        # (e.g. "... 10:30:30") never matches its own stored value and every
+        # overwrite call would issue a pointless maintenance.update, defeating
+        # the no-op-on-repeat guarantee for timer-driven callers.
+        since_epoch = int(time.mktime(since_dt.timetuple())) // 60 * 60
+        till_epoch = int(time.mktime(till_dt.timetuple())) // 60 * 60
+        timeperiods = [{"start_date": since_epoch, "period": till_epoch - since_epoch}]
 
         existing = self._call(
             "maintenance.get",
