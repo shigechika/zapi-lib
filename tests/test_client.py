@@ -767,6 +767,13 @@ def test_set_maintenance_overwrite_is_noop_when_values_match():
                     "active_since": str(_epoch("2025/01/01 00:00:00")),
                     "active_till": str(_epoch("2025/01/01 01:00:00")),
                     "description": "desc",
+                    "timeperiods": [
+                        {
+                            "timeperiod_type": "0",
+                            "start_date": str(_epoch("2025/01/01 00:00:00")),
+                            "period": "3600",
+                        }
+                    ],
                 }
             ]
         }
@@ -836,6 +843,37 @@ def test_set_maintenance_overwrite_survives_unreadable_stored_times(row):
         assert result == ["555"]
         call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.update")
         assert call["params"]["active_till"] == _epoch("2025/01/01 01:00:00")
+
+
+def test_set_maintenance_overwrite_rewrites_stale_time_period():
+    # Bounds and description can match while the period inside them does not
+    # (e.g. someone shortened it by hand in the UI). The period is what actually
+    # suppresses alerts, so treating that window as unchanged would leave
+    # suppression on the stale schedule.
+    r = make_router(
+        results={
+            "maintenance.get": [
+                {
+                    "maintenanceid": "555",
+                    "active_since": str(_epoch("2025/01/01 00:00:00")),
+                    "active_till": str(_epoch("2025/01/01 01:00:00")),
+                    "description": "desc",
+                    "timeperiods": [
+                        {
+                            "timeperiod_type": "0",
+                            "start_date": str(_epoch("2025/01/01 00:00:00")),
+                            "period": "600",  # 10 min, not the requested hour
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    with r:
+        z = ZapiProvisioner("https://zabbix.example.com", "u", "p")
+        z.set_maintenance("tokyo", "2025/01/01 00:00:00", "2025/01/01 01:00:00", "MW-", "desc", overwrite=True)
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "maintenance.update")
+        assert call["params"]["timeperiods"][0]["period"] == 3600
 
 
 def test_set_maintenance_does_not_overwrite_by_default():

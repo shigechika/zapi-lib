@@ -41,6 +41,27 @@ def tag_filter(tag: str, value: str | None = None) -> dict:
     return {"tag": tag, "operator": TAG_OP_EXISTS}
 
 
+def _timeperiod_matches(rows: object, start_date: int, period: int) -> bool:
+    """True when the stored schedule is exactly the single one-time period we'd write.
+
+    The outer ``active_since``/``active_till`` frame is only a bound; what
+    actually suppresses alerts is the time period inside it. A window whose
+    bounds match but whose period was edited by hand would otherwise be treated
+    as unchanged, leaving suppression on the stale schedule. Anything we can't
+    read as that exact single period counts as a mismatch, which errs toward
+    writing the caller's requested schedule.
+    """
+    if not isinstance(rows, list) or len(rows) != 1:
+        return False
+    row = rows[0]
+    if not isinstance(row, dict):
+        return False
+    # timeperiod_type 0 == one-time, the only kind this helper creates.
+    if str(row.get("timeperiod_type", "0")) != "0":
+        return False
+    return _epoch_or_none(row.get("start_date")) == start_date and _epoch_or_none(row.get("period")) == period
+
+
 def _epoch_or_none(value: object) -> int | None:
     """Coerce a Zabbix epoch field to int, or None when it can't be read.
 
@@ -533,6 +554,7 @@ class ZapiClient:
             {
                 "filter": {"name": maint_name},
                 "output": ["maintenanceid", "active_since", "active_till", "description"],
+                "selectTimeperiods": "extend",
             },
         )
         if existing:
@@ -541,8 +563,9 @@ class ZapiClient:
                 self.logger.info("maintenance already exists, skipping: %s", maint_name)
                 return ids
             for row in existing:
-                # Compare every field the update would write -- description
-                # included. Skipping a description-only correction would
+                # Compare every field the update would write -- description and
+                # the time period included. The period is the part that actually
+                # suppresses alerts; the outer bounds are only a frame. Skipping a description-only correction would
                 # reproduce, inside the overwrite path, the exact silent-drop
                 # this option exists to fix.
                 #
@@ -559,6 +582,7 @@ class ZapiClient:
                     _epoch_or_none(row.get("active_since")) == since_epoch
                     and _epoch_or_none(row.get("active_till")) == till_epoch
                     and row.get("description") == description
+                    and _timeperiod_matches(row.get("timeperiods"), since_epoch, timeperiods[0]["period"])
                 ):
                     self.logger.info("maintenance unchanged: %s", maint_name)
                     continue
