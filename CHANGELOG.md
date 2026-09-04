@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/shigechika/zapi-lib/compare/v0.8.0...v0.8.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **client:** backfill get_problems hosts via event.get when problem.get omits them ([#41](https://github.com/shigechika/zapi-lib/issues/41)) ([90db454](https://github.com/shigechika/zapi-lib/commit/90db454685c1d7c81d300fd499b1232b6ecbb69f))
+
 ## [0.8.0](https://github.com/shigechika/zapi-lib/compare/v0.7.0...v0.8.0) (2026-09-04)
 
 
