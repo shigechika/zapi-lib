@@ -308,7 +308,37 @@ class ZapiClient:
             params["severities"] = severities
         if tags:
             params["tags"] = tags
-        return self._call("problem.get", params)
+        problems = self._call("problem.get", params)
+        self._backfill_hosts_via_events(problems)
+        return problems
+
+    def _backfill_hosts_via_events(self, problems: list[dict]) -> None:
+        """Fill in ``hosts`` via ``event.get`` for rows ``problem.get`` left empty.
+
+        Observed on Zabbix 6.0.42: ``problem.get``'s ``selectHosts`` is silently
+        ignored (no error, just no ``hosts`` key), while the identical
+        ``selectHosts`` request against ``event.get`` for the same ``eventid``
+        resolves correctly. This issues one batched ``event.get`` call (not one
+        per problem) covering only the eventids ``problem.get`` left empty, so
+        well-behaved Zabbix versions that already populate ``hosts`` incur no
+        extra call.
+        """
+        missing = [p for p in problems if not p.get("hosts")]
+        if not missing:
+            return
+        events = self._call(
+            "event.get",
+            {
+                "output": ["eventid"],
+                "selectHosts": ["host", "name"],
+                "eventids": [p["eventid"] for p in missing],
+                "source": 0,
+                "object": 0,
+            },
+        )
+        hosts_by_eventid = {e["eventid"]: e.get("hosts", []) for e in events}
+        for p in missing:
+            p["hosts"] = hosts_by_eventid.get(p["eventid"], [])
 
     def count_problems(
         self,

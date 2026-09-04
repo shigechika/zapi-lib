@@ -122,6 +122,41 @@ def test_get_problems_passes_severities_and_returns_results():
         assert call["params"]["selectHosts"] == ["host", "name"]
 
 
+def test_get_problems_skips_event_get_when_hosts_already_present():
+    """SAMPLE_PROBLEM already carries hosts -- no backfill call should fire."""
+    r = make_router(results={"problem.get": [SAMPLE_PROBLEM]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        c.get_problems()
+        assert not any(x["payload"]["method"] == "event.get" for x in r.captured)
+
+
+def test_get_problems_backfills_hosts_via_event_get_when_problem_get_omits_them():
+    """Some Zabbix versions silently drop `hosts` from problem.get; event.get resolves it."""
+    no_hosts = {k: v for k, v in SAMPLE_PROBLEM.items() if k != "hosts"}
+    event_with_host = {"eventid": "5001", "hosts": [{"host": "core-rt1", "name": "Core RT1"}]}
+    r = make_router(results={"problem.get": [no_hosts], "event.get": [event_with_host]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        problems = c.get_problems()
+        assert problems[0]["hosts"][0]["host"] == "core-rt1"
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "event.get")
+        assert call["params"]["eventids"] == ["5001"]
+        assert call["params"]["selectHosts"] == ["host", "name"]
+        assert call["params"]["source"] == 0
+        assert call["params"]["object"] == 0
+
+
+def test_get_problems_backfill_degrades_to_empty_hosts_when_event_get_also_empty():
+    """If event.get can't resolve it either, hosts ends up [] rather than missing/crashing."""
+    no_hosts = {k: v for k, v in SAMPLE_PROBLEM.items() if k != "hosts"}
+    r = make_router(results={"problem.get": [no_hosts], "event.get": []})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        problems = c.get_problems()
+        assert problems[0]["hosts"] == []
+
+
 def test_count_problems_uses_count_output():
     r = make_router(results={"problem.get": [SAMPLE_PROBLEM, SAMPLE_PROBLEM, SAMPLE_PROBLEM]})
     with r:
