@@ -287,12 +287,16 @@ class ZapiClient:
     ) -> list[dict]:
         """Return active problems, optionally filtered by severity and tags.
 
-        Output includes ``eventid`` so callers can acknowledge problems.
+        Output includes ``eventid`` so callers can acknowledge problems, and
+        ``hosts`` (each with ``host``/``name``) so callers can identify which
+        host a problem belongs to without a separate lookup -- matching what
+        ``get_events``/``get_maintenances`` already return.
         """
         params: dict = {
             "output": "extend",
             "selectAcknowledges": "count",
             "selectTags": "extend",
+            "selectHosts": ["host", "name"],
             # problem.get only permits "eventid" as a sortfield; callers that
             # need severity ordering re-bucket in Python.
             "sortfield": "eventid",

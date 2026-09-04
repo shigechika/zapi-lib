@@ -115,9 +115,11 @@ def test_get_problems_passes_severities_and_returns_results():
         c = ZapiClient("https://zabbix.example.com", "u", "p")
         problems = c.get_problems(severities=[4, 5])
         assert problems[0]["eventid"] == "5001"
+        assert problems[0]["hosts"][0]["host"] == "core-rt1"
         call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "problem.get")
         assert call["params"]["severities"] == [4, 5]
         assert call["params"]["suppressed"] is False
+        assert call["params"]["selectHosts"] == ["host", "name"]
 
 
 def test_count_problems_uses_count_output():
