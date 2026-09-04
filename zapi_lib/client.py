@@ -345,7 +345,9 @@ class ZapiClient:
                 "object": 0,
             },
         )
-        hosts_by_eventid = {e["eventid"]: e.get("hosts", []) for e in events if e.get("eventid")}
+        hosts_by_eventid = {
+            e["eventid"]: e.get("hosts", []) for e in events if isinstance(e, dict) and e.get("eventid")
+        }
         for p in missing:
             p["hosts"] = hosts_by_eventid.get(p.get("eventid"), [])
 

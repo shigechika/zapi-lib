@@ -179,6 +179,16 @@ def test_get_problems_backfill_dedupes_eventids():
         assert call["params"]["eventids"] == ["5001"]
 
 
+def test_get_problems_backfill_survives_malformed_event_get_rows():
+    """A non-dict row in event.get's response (e.g. [null]) must not raise AttributeError."""
+    no_hosts = {k: v for k, v in SAMPLE_PROBLEM.items() if k != "hosts"}
+    r = make_router(results={"problem.get": [no_hosts], "event.get": [None]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        problems = c.get_problems()
+        assert problems[0]["hosts"] == []
+
+
 def test_count_problems_uses_count_output():
     r = make_router(results={"problem.get": [SAMPLE_PROBLEM, SAMPLE_PROBLEM, SAMPLE_PROBLEM]})
     with r:
