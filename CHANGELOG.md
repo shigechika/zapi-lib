@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/shigechika/zapi-lib/compare/v0.7.0...v0.8.0) (2026-09-04)
+
+
+### Features
+
+* **client:** include host name in get_problems output ([#39](https://github.com/shigechika/zapi-lib/issues/39)) ([c6d1a1f](https://github.com/shigechika/zapi-lib/commit/c6d1a1f6a2b5e231fe26c01b92d0f2f4b8acb930))
+
 ## [0.7.0](https://github.com/shigechika/zapi-lib/compare/v0.6.1...v0.7.0) (2026-08-14)
 
 
