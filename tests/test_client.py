@@ -157,6 +157,28 @@ def test_get_problems_backfill_degrades_to_empty_hosts_when_event_get_also_empty
         assert problems[0]["hosts"] == []
 
 
+def test_get_problems_backfill_skips_event_get_when_no_valid_eventids():
+    """A row with no eventid must degrade, not raise KeyError, and must not call event.get."""
+    no_eventid_or_hosts = {k: v for k, v in SAMPLE_PROBLEM.items() if k not in ("eventid", "hosts")}
+    r = make_router(results={"problem.get": [no_eventid_or_hosts]})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        problems = c.get_problems()
+        assert problems[0]["hosts"] == []
+        assert not any(x["payload"]["method"] == "event.get" for x in r.captured)
+
+
+def test_get_problems_backfill_dedupes_eventids():
+    """Two problems sharing an eventid (unexpected, but shouldn't double the batch request)."""
+    no_hosts = {k: v for k, v in SAMPLE_PROBLEM.items() if k != "hosts"}
+    r = make_router(results={"problem.get": [no_hosts, dict(no_hosts)], "event.get": []})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+        c.get_problems()
+        call = next(x["payload"] for x in r.captured if x["payload"]["method"] == "event.get")
+        assert call["params"]["eventids"] == ["5001"]
+
+
 def test_count_problems_uses_count_output():
     r = make_router(results={"problem.get": [SAMPLE_PROBLEM, SAMPLE_PROBLEM, SAMPLE_PROBLEM]})
     with r:

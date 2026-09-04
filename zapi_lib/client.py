@@ -326,19 +326,28 @@ class ZapiClient:
         missing = [p for p in problems if not p.get("hosts")]
         if not missing:
             return
+        # Dedup while preserving order (a de-duplicated batch is the minimal
+        # request); skip .get("eventid")-less rows rather than raising --
+        # an unexpected shape here shouldn't turn into a raw KeyError, and
+        # such rows simply get hosts=[] below like any other unresolved row.
+        eventids = list(dict.fromkeys(eid for p in missing if (eid := p.get("eventid"))))
+        if not eventids:
+            for p in missing:
+                p["hosts"] = []
+            return
         events = self._call(
             "event.get",
             {
                 "output": ["eventid"],
                 "selectHosts": ["host", "name"],
-                "eventids": [p["eventid"] for p in missing],
+                "eventids": eventids,
                 "source": 0,
                 "object": 0,
             },
         )
-        hosts_by_eventid = {e["eventid"]: e.get("hosts", []) for e in events}
+        hosts_by_eventid = {e["eventid"]: e.get("hosts", []) for e in events if e.get("eventid")}
         for p in missing:
-            p["hosts"] = hosts_by_eventid.get(p["eventid"], [])
+            p["hosts"] = hosts_by_eventid.get(p.get("eventid"), [])
 
     def count_problems(
         self,
