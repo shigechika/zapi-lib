@@ -102,6 +102,7 @@ SAMPLE_PROBLEM = {
     "acknowledged": "0",
     "acknowledges": "0",
     "tags": [{"tag": "role", "value": "main"}],
+    "hosts": [{"host": "core-rt1", "name": "Core RT1"}],
 }
 
 SAMPLE_HOST = {
