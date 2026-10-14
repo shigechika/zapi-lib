@@ -31,7 +31,15 @@ TAG_OP_EXISTS = "4"
 
 
 class ZapiError(Exception):
-    """Base error for Zabbix API failures."""
+    """Base error for Zabbix API failures.
+
+    ``error`` holds the JSON-RPC error object (``code``/``message``/``data``) when
+    Zabbix returned one, else None (HTTP or connection failures).
+    """
+
+    def __init__(self, *args, error: dict | None = None):
+        super().__init__(*args)
+        self.error = error
 
 
 class ZapiAuthError(ZapiError):
@@ -150,9 +158,10 @@ class ZapiClient:
         except httpx.HTTPError as e:
             raise ZapiError(f"Connection error calling {method}: {e}") from e
         if err := body.get("error"):
+            error = err if isinstance(err, dict) else None
             if method == "user.login":
-                raise ZapiAuthError(f"Authentication failed: {err}")
-            raise ZapiError(f"{method} failed: {err}")
+                raise ZapiAuthError(f"Authentication failed: {err}", error=error)
+            raise ZapiError(f"{method} failed: {err}", error=error)
         return body["result"]
 
     # ------------------------------------------------------------------
@@ -201,20 +210,27 @@ class ZapiClient:
         it goes in the ``Authorization: Bearer`` header. The check is a
         ``hostgroup.get`` with ``limit: 1``; it returns an empty list rather than an
         error when the user sees no groups. A user role may deny the method itself
-        ("No permissions to call ..."): Zabbix only says that after accepting the
-        token, so the token is kept. Any other API error rejects the token.
+        ("No permissions to call ..." in the error's ``data``): Zabbix only says
+        that after accepting the token, so the token is kept. A role with API
+        access turned off may answer the same way; such a token then fails on its
+        first real call instead of here. Any other API error, and HTTP 401/403
+        from the endpoint or a proxy in front of it, rejects the token.
         """
         self._bearer = self._version_tuple(self.version) >= (6, 4)
         self._token = token
         try:
             self._call("hostgroup.get", {"output": ["groupid"], "limit": 1})
         except ZapiError as e:
-            if isinstance(e.__cause__, httpx.HTTPError):
-                raise  # a connection problem, not a bad token
-            if "no permissions to call" in str(e).lower():
+            cause = e.__cause__
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in (401, 403):
+                raise ZapiAuthError(f"API token rejected: {e}") from e
+            if isinstance(cause, httpx.HTTPError):
+                raise  # a connection or server problem, not a bad token
+            data = str((e.error or {}).get("data", ""))
+            if "no permissions to call" in data.lower():
                 return  # authenticated; the role just does not allow hostgroup.get
             # Zabbix's error text never contains the token; keep it that way.
-            raise ZapiAuthError(f"API token rejected: {e}") from e
+            raise ZapiAuthError(f"API token rejected: {e}", error=e.error) from e
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -870,7 +886,13 @@ class ZapiProvisioner(ZapiClient):
         # construction). It is created on demand when a host is first written
         # (see _group_list), so a provisioner used only for reads / raw calls
         # never creates a group just by being constructed.
-        self.group_id: str | None = self.get_group_id(group) if group else None
+        try:
+            self.group_id: str | None = self.get_group_id(group) if group else None
+        except BaseException:
+            # Same reason as in ZapiClient.__init__: __exit__ never runs for a
+            # failed constructor, so close the http client here.
+            self._http.close()
+            raise
 
     @classmethod
     def from_config(

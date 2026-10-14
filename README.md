@@ -51,8 +51,10 @@ with ZapiClient("https://zabbix.example.com", api_token="<token>") as z:
 
 The token is sent the same way as a session token (`auth` field before 6.4,
 `Authorization: Bearer` from 6.4) and checked once with a `hostgroup.get` of one row;
-a rejected token raises `ZapiAuthError`. A user role that does not allow
-`hostgroup.get` is fine: Zabbix only refuses the method after accepting the token. Give either a token or a user and password,
+a rejected token (or HTTP 401/403) raises `ZapiAuthError`. A user role that does not
+allow `hostgroup.get` is fine for `ZapiClient`: Zabbix only refuses the method after
+accepting the token. `ZapiProvisioner` with a `group` looks the group up with
+`hostgroup.get`, so its role must allow that method. Give either a token or a user and password,
 not both.
 
 `set_maintenance(location, since, till, name, description)` opens an idempotent
@@ -93,13 +95,21 @@ managed-by marker:
 ```ini
 [zabbix]
 url      = https://zabbix.example.com/api_jsonrpc.php
-id       = api-user        ; or `user`
-pw       = api-pass        ; or `password`
-; token  = <api-token>     ; instead of id/pw (leave id/pw empty)
-group    = DefaultGroup    ; default host group for created/updated hosts
-location = tokyo           ; optional; added as a `location` tag
-tag      = my-collector    ; optional; managed-by marker tag on hosts/items
+; or `user` / `password`
+id       = api-user
+pw       = api-pass
+; or, instead of id/pw (leave them empty): an API token
+; token  = <api-token>
+; default host group for created/updated hosts
+group    = DefaultGroup
+; optional; added as a `location` tag
+location = tokyo
+; optional; managed-by marker tag on hosts/items
+tag      = my-collector
 ```
+
+Comments must be on their own lines: an inline `; ...` after a value is read as part of
+the value (passwords may contain `;`, so inline comments are not enabled).
 
 ```python
 from zapi_lib import ZapiProvisioner

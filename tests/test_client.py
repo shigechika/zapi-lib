@@ -1242,6 +1242,55 @@ def test_a_token_whose_role_denies_the_check_method_is_still_accepted():
     assert c._token == TOKEN
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_http_401_or_403_during_the_token_check_rejects_the_token(status):
+    with _token_check_router(lambda _: httpx.Response(status)):
+        with pytest.raises(ZapiAuthError, match="API token rejected"):
+            ZapiClient("https://zabbix.example.com", api_token=TOKEN)
+
+
+def test_http_500_during_the_token_check_is_not_reported_as_a_bad_token():
+    with _token_check_router(lambda _: httpx.Response(500)):
+        with pytest.raises(ZapiError) as exc:
+            ZapiClient("https://zabbix.example.com", api_token=TOKEN)
+    assert not isinstance(exc.value, ZapiAuthError)
+
+
+def test_the_permission_phrase_outside_data_does_not_keep_a_bad_token():
+    """Only Zabbix's data field decides; the phrase elsewhere in the error does not."""
+    err = {"code": -32602, "message": "No permissions to call anything", "data": "Not authorized."}
+    with _token_check_router(lambda _: httpx.Response(200, json={"jsonrpc": "2.0", "error": err, "id": 1})):
+        with pytest.raises(ZapiAuthError):
+            ZapiClient("https://zabbix.example.com", api_token=TOKEN)
+
+
+def test_api_errors_carry_the_json_rpc_error_object():
+    err = {"code": -32602, "message": "Invalid params.", "data": "boom"}
+    r = make_router(results={})
+    with r:
+        c = ZapiClient("https://zabbix.example.com", "u", "p")
+
+    def handler(request):
+        return httpx.Response(200, json={"jsonrpc": "2.0", "error": err, "id": 1})
+
+    with respx.mock(assert_all_called=False) as m:
+        m.post(ENDPOINT).mock(side_effect=handler)
+        with pytest.raises(ZapiError) as exc:
+            c.call("host.get", {})
+    assert exc.value.error == err
+
+
+def test_provisioner_closes_the_http_client_when_the_group_lookup_fails(tmp_path, monkeypatch):
+    closed = []
+    real_close = httpx.Client.close
+    monkeypatch.setattr(httpx.Client, "close", lambda self: (closed.append(True), real_close(self))[1])
+    err = {"code": -32500, "message": "Application error.", "data": 'No permissions to call "hostgroup.get".'}
+    with _token_check_router(lambda _: httpx.Response(200, json={"jsonrpc": "2.0", "error": err, "id": 1})):
+        with pytest.raises(ZapiError):
+            ZapiProvisioner("https://zabbix.example.com", api_token=TOKEN, group="G")
+    assert closed
+
+
 def test_a_connection_error_during_the_token_check_is_not_reported_as_a_bad_token():
     def boom(_):
         raise httpx.ConnectError("boom")
