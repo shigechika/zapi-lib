@@ -1319,6 +1319,16 @@ def test_credentials_must_be_a_token_or_a_user_and_password(kwargs):
     assert not route.called  # rejected before any network call
 
 
+@pytest.mark.parametrize("bad", ["tökén", "abc def", "abc\ndef", "abc\r\nX-Injected: 1", "abc\tdef"])
+def test_a_malformed_api_token_is_rejected_before_any_request(bad):
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(ENDPOINT)
+        with pytest.raises(ZapiAuthError, match="printable ASCII") as exc:
+            ZapiClient("https://zabbix.example.com", api_token=bad)
+    assert not route.called
+    assert bad not in str(exc.value)
+
+
 def test_from_config_accepts_an_api_token(tmp_path):
     cfg = tmp_path / "config.ini"
     cfg.write_text(f"[zabbix]\nurl = https://zabbix.example.com\nid =\npw =\ntoken = {TOKEN}\n")

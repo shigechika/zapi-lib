@@ -113,6 +113,12 @@ class ZapiClient:
             raise ZapiAuthError("give either api_token or user/password, not both")
         if not api_token and not (user and password):
             raise ZapiAuthError("Zabbix credentials missing: give api_token, or both user and password")
+        if api_token and not (
+            api_token.isascii() and api_token.isprintable() and not any(c.isspace() for c in api_token)
+        ):
+            # Zabbix tokens are hex strings. Anything else cannot go into an HTTP header
+            # (non-ASCII raises UnicodeEncodeError, CR/LF would split it); never echo it.
+            raise ZapiAuthError("API token must be printable ASCII without whitespace")
         # Every instance gets a usable self.logger, not just ZapiProvisioner
         # (whose __init__ used to be the only place this was set -- a plain
         # ZapiClient hit AttributeError as soon as any code path here logged,
