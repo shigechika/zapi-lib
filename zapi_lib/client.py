@@ -5,6 +5,10 @@ carried in the request body. Authentication is version-adaptive but always
 degrades to the proven ``user`` + ``auth``-field path used by older Zabbix
 (<= 6.2), so the client works against current production while staying
 forward-compatible with 6.4 / 7.0 (``username`` + ``Authorization: Bearer``).
+
+Instead of a user and password, the client also accepts a Zabbix API token
+(Zabbix 5.4+). The token is sent the same way as a session token (``auth`` field
+before 6.4, ``Authorization: Bearer`` from 6.4) and no ``user.login`` happens.
 """
 
 import configparser
@@ -27,7 +31,15 @@ TAG_OP_EXISTS = "4"
 
 
 class ZapiError(Exception):
-    """Base error for Zabbix API failures."""
+    """Base error for Zabbix API failures.
+
+    ``error`` holds the JSON-RPC error object (``code``/``message``/``data``) when
+    Zabbix returned one, else None (HTTP or connection failures).
+    """
+
+    def __init__(self, *args, error: dict | None = None):
+        super().__init__(*args)
+        self.error = error
 
 
 class ZapiAuthError(ZapiError):
@@ -84,12 +96,29 @@ class ZapiClient:
     def __init__(
         self,
         url: str,
-        user: str,
-        password: str,
+        user: str | None = None,
+        password: str | None = None,
         *,
+        api_token: str | None = None,
         logger: logging.Logger | None = None,
         timeout: int = DEFAULT_TIMEOUT,
     ):
+        """Connect and authenticate with either ``user`` + ``password`` or ``api_token``.
+
+        Passing both, or neither, raises :class:`ZapiAuthError` before any network
+        call. With ``api_token`` the token is checked with one cheap authenticated
+        call, so a revoked or mistyped token fails here rather than on first use.
+        """
+        if api_token and (user or password):
+            raise ZapiAuthError("give either api_token or user/password, not both")
+        if not api_token and not (user and password):
+            raise ZapiAuthError("Zabbix credentials missing: give api_token, or both user and password")
+        if api_token and not (
+            api_token.isascii() and api_token.isprintable() and not any(c.isspace() for c in api_token)
+        ):
+            # Zabbix tokens are hex strings. Anything else cannot go into an HTTP header
+            # (non-ASCII raises UnicodeEncodeError, CR/LF would split it); never echo it.
+            raise ZapiAuthError("API token must be printable ASCII without whitespace")
         # Every instance gets a usable self.logger, not just ZapiProvisioner
         # (whose __init__ used to be the only place this was set -- a plain
         # ZapiClient hit AttributeError as soon as any code path here logged,
@@ -107,7 +136,10 @@ class ZapiClient:
         # http client here to avoid leaking it on a failed connection/login.
         try:
             self.version = self.api_version()
-            self._token = self._login(user, password)
+            if api_token:
+                self._use_api_token(api_token)
+            else:
+                self._token = self._login(user, password)
         except BaseException:
             self._http.close()
             raise
@@ -132,9 +164,10 @@ class ZapiClient:
         except httpx.HTTPError as e:
             raise ZapiError(f"Connection error calling {method}: {e}") from e
         if err := body.get("error"):
+            error = err if isinstance(err, dict) else None
             if method == "user.login":
-                raise ZapiAuthError(f"Authentication failed: {err}")
-            raise ZapiError(f"{method} failed: {err}")
+                raise ZapiAuthError(f"Authentication failed: {err}", error=error)
+            raise ZapiError(f"{method} failed: {err}", error=error)
         return body["result"]
 
     # ------------------------------------------------------------------
@@ -175,6 +208,35 @@ class ZapiClient:
             # with the other name and degrade to the proven `auth` field.
             self._bearer = False
             return self._call("user.login", {fallback: user, "password": password}, auth=False)
+
+    def _use_api_token(self, token: str) -> None:
+        """Authenticate with an API token: no login, one cheap call to check it.
+
+        Before 6.4 the token goes in the ``auth`` field like a session id; from 6.4
+        it goes in the ``Authorization: Bearer`` header. The check is a
+        ``hostgroup.get`` with ``limit: 1``; it returns an empty list rather than an
+        error when the user sees no groups. A user role may deny the method itself
+        ("No permissions to call ..." in the error's ``data``): Zabbix only says
+        that after accepting the token, so the token is kept. A role with API
+        access turned off may answer the same way; such a token then fails on its
+        first real call instead of here. Any other API error, and HTTP 401/403
+        from the endpoint or a proxy in front of it, rejects the token.
+        """
+        self._bearer = self._version_tuple(self.version) >= (6, 4)
+        self._token = token
+        try:
+            self._call("hostgroup.get", {"output": ["groupid"], "limit": 1})
+        except ZapiError as e:
+            cause = e.__cause__
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in (401, 403):
+                raise ZapiAuthError(f"API token rejected: {e}") from e
+            if isinstance(cause, httpx.HTTPError):
+                raise  # a connection or server problem, not a bad token
+            data = str((e.error or {}).get("data", ""))
+            if "no permissions to call" in data.lower():
+                return  # authenticated; the role just does not allow hostgroup.get
+            # Zabbix's error text never contains the token; keep it that way.
+            raise ZapiAuthError(f"API token rejected: {e}", error=e.error) from e
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -807,9 +869,10 @@ class ZapiProvisioner(ZapiClient):
     def __init__(
         self,
         url: str,
-        user: str,
-        password: str,
+        user: str | None = None,
+        password: str | None = None,
         *,
+        api_token: str | None = None,
         group: str | None = None,
         location: str | None = None,
         managed_tag: str | None = None,
@@ -824,12 +887,18 @@ class ZapiProvisioner(ZapiClient):
         self.default_group = group
         self.default_location = location
         self.managed_tag = managed_tag
-        super().__init__(url, user, password, logger=logger, timeout=timeout)
+        super().__init__(url, user, password, api_token=api_token, logger=logger, timeout=timeout)
         # Resolve the default group id (GET only — no write side effect at
         # construction). It is created on demand when a host is first written
         # (see _group_list), so a provisioner used only for reads / raw calls
         # never creates a group just by being constructed.
-        self.group_id: str | None = self.get_group_id(group) if group else None
+        try:
+            self.group_id: str | None = self.get_group_id(group) if group else None
+        except BaseException:
+            # Same reason as in ZapiClient.__init__: __exit__ never runs for a
+            # failed constructor, so close the http client here.
+            self._http.close()
+            raise
 
     @classmethod
     def from_config(
@@ -843,7 +912,8 @@ class ZapiProvisioner(ZapiClient):
         """Build a provisioner from a ``config.ini`` ``[zabbix]`` section.
 
         ``path`` defaults to ``./config.ini`` then ``~/.config.ini``. Credentials
-        accept either ``id``/``pw`` or the ``user``/``password`` aliases.
+        accept either ``id``/``pw`` (or the ``user``/``password`` aliases) or an API
+        ``token`` -- one of the two, not both.
         """
         cfg = configparser.ConfigParser(allow_no_value=True)
         cfg.read(path or _default_config_path())
@@ -853,12 +923,18 @@ class ZapiProvisioner(ZapiClient):
         # NoOptionError about an alias key the operator never wrote.
         user = cfg.get(section, "id", fallback="") or cfg.get(section, "user", fallback="")
         password = cfg.get(section, "pw", fallback="") or cfg.get(section, "password", fallback="")
-        if not user or not password:
-            raise ZapiAuthError(f"Zabbix credentials not set in [{section}]: fill in id/pw (or user/password)")
+        token = cfg.get(section, "token", fallback="") or ""
+        if token and (user or password):
+            raise ZapiAuthError(f"[{section}] sets both token and id/pw: keep one of them")
+        if not token and (not user or not password):
+            raise ZapiAuthError(
+                f"Zabbix credentials not set in [{section}]: fill in id/pw (or user/password), or token"
+            )
         return cls(
             cfg.get(section, "url"),
-            user,
-            password,
+            user or None,
+            password or None,
+            api_token=token or None,
             group=cfg.get(section, "group", fallback=None),
             location=cfg.get(section, "location", fallback=None),
             managed_tag=cfg.get(section, "tag", fallback=None),
