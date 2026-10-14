@@ -1180,3 +1180,100 @@ def test_call_auth_false_omits_token_after_login():
         last = r.captured[-1]
         assert "auth" not in last["payload"]
         assert "authorization" not in {k.lower() for k in last["headers"]}
+
+
+# ---- API token -------------------------------------------------------------
+
+TOKEN = "f00dbabe" * 8
+
+
+def test_api_token_before_6_4_goes_in_the_auth_field_without_login():
+    r = make_router(version="6.0.42")
+    with r:
+        c = ZapiClient("https://zabbix.example.com", api_token=TOKEN)
+        c.get_problems()
+    methods = [x["payload"]["method"] for x in r.captured]
+    assert "user.login" not in methods
+    check = next(x for x in r.captured if x["payload"]["method"] == "hostgroup.get")
+    assert check["payload"]["params"] == {"output": ["groupid"], "limit": 1}
+    problem_call = next(x for x in r.captured if x["payload"]["method"] == "problem.get")
+    assert problem_call["payload"]["auth"] == TOKEN
+    assert "authorization" not in {k.lower() for k in problem_call["headers"]}
+
+
+def test_api_token_from_6_4_goes_in_the_bearer_header():
+    r = make_router(version="7.0.5")
+    with r:
+        c = ZapiClient("https://zabbix.example.com", api_token=TOKEN)
+        c.get_problems()
+    assert "user.login" not in [x["payload"]["method"] for x in r.captured]
+    problem_call = next(x for x in r.captured if x["payload"]["method"] == "problem.get")
+    assert "auth" not in problem_call["payload"]
+    assert problem_call["headers"].get("authorization") == f"Bearer {TOKEN}"
+
+
+def _token_check_router(token_check_response):
+    """apiinfo.version answers 6.0.42; every other call gets ``token_check_response``."""
+
+    def handler(request):
+        payload = json.loads(request.content)
+        if payload["method"] == "apiinfo.version":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "result": "6.0.42", "id": 1})
+        return token_check_response(payload)
+
+    router = respx.mock(assert_all_called=False)
+    router.post(ENDPOINT).mock(side_effect=handler)
+    return router
+
+
+def test_a_rejected_api_token_raises_auth_error_without_echoing_it():
+    err = {"code": -32602, "message": "Invalid params.", "data": "Not authorized."}
+    with _token_check_router(lambda _: httpx.Response(200, json={"jsonrpc": "2.0", "error": err, "id": 1})):
+        with pytest.raises(ZapiAuthError, match="API token rejected") as exc:
+            ZapiClient("https://zabbix.example.com", api_token=TOKEN)
+    assert TOKEN not in str(exc.value)
+
+
+def test_a_connection_error_during_the_token_check_is_not_reported_as_a_bad_token():
+    def boom(_):
+        raise httpx.ConnectError("boom")
+
+    with _token_check_router(boom):
+        with pytest.raises(ZapiError) as exc:
+            ZapiClient("https://zabbix.example.com", api_token=TOKEN)
+    assert not isinstance(exc.value, ZapiAuthError)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"user": "u", "password": "p", "api_token": TOKEN},
+        {"user": "u", "api_token": TOKEN},
+        {},
+        {"user": "u"},
+        {"password": "p"},
+    ],
+)
+def test_credentials_must_be_a_token_or_a_user_and_password(kwargs):
+    with respx.mock(assert_all_called=False) as m:
+        route = m.post(ENDPOINT)
+        with pytest.raises(ZapiAuthError):
+            ZapiClient("https://zabbix.example.com", **kwargs)
+    assert not route.called  # rejected before any network call
+
+
+def test_from_config_accepts_an_api_token(tmp_path):
+    cfg = tmp_path / "config.ini"
+    cfg.write_text(f"[zabbix]\nurl = https://zabbix.example.com\nid =\npw =\ntoken = {TOKEN}\n")
+    r = make_router(version="6.0.42")
+    with r:
+        z = ZapiProvisioner.from_config(path=str(cfg))
+        assert z._token == TOKEN
+    assert "user.login" not in [x["payload"]["method"] for x in r.captured]
+
+
+def test_from_config_rejects_both_token_and_password(tmp_path):
+    cfg = tmp_path / "config.ini"
+    cfg.write_text(f"[zabbix]\nurl = https://zabbix.example.com\nid = u\npw = p\ntoken = {TOKEN}\n")
+    with pytest.raises(ZapiAuthError, match="both token and id/pw"):
+        ZapiProvisioner.from_config(path=str(cfg))

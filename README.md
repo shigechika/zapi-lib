@@ -11,6 +11,8 @@ can depend on it without pulling in the MCP server stack (`mcp`, `starlette`, `u
 
 - **Version-adaptive auth**: `user` + `auth` field (Zabbix ≤ 6.2) and
   `username` + `Authorization: Bearer` (6.4 / 7.0), degrading to the proven path automatically.
+- **API tokens** (Zabbix 5.4+): pass `api_token=` instead of a user and password; no
+  `user.login` happens, and the token is checked once at construction.
 - **Read helpers**: `get_hosts`, `get_items`, `get_problems`, `count_problems`, `get_events`,
   `get_maintenances`.
 - **Write helpers**: `set_host_tag` (idempotent host-tag upsert that preserves other tags),
@@ -39,6 +41,18 @@ with ZapiClient("https://zabbix.example.com", "api-user", "api-pass") as z:
 ```
 
 The URL may be given with or without the `/api_jsonrpc.php` suffix.
+
+To use a Zabbix API token instead of a password, pass it by keyword:
+
+```python
+with ZapiClient("https://zabbix.example.com", api_token="<token>") as z:
+    ...
+```
+
+The token is sent the same way as a session token (`auth` field before 6.4,
+`Authorization: Bearer` from 6.4) and checked once with a `hostgroup.get` of one row;
+a rejected token raises `ZapiAuthError`. Give either a token or a user and password,
+not both.
 
 `set_maintenance(location, since, till, name, description)` opens an idempotent
 maintenance window over hosts carrying a matching `location` tag;
@@ -80,6 +94,7 @@ managed-by marker:
 url      = https://zabbix.example.com/api_jsonrpc.php
 id       = api-user        ; or `user`
 pw       = api-pass        ; or `password`
+; token  = <api-token>     ; instead of id/pw (leave id/pw empty)
 group    = DefaultGroup    ; default host group for created/updated hosts
 location = tokyo           ; optional; added as a `location` tag
 tag      = my-collector    ; optional; managed-by marker tag on hosts/items

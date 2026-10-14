@@ -51,7 +51,12 @@ no stdio/transport concerns, just an importable package.
     escape hatch for JSON-RPC methods without a dedicated wrapper.
     Construction itself hits the network (`apiinfo.version` + `user.login`)
     and closes the httpx client if that raises (since `__enter__`/`__exit__`
-    never run for a failed constructor).
+    never run for a failed constructor). With `api_token=` there is no
+    login: the token becomes the session token (`auth` field before 6.4,
+    Bearer from 6.4) and `_use_api_token` checks it with a one-row
+    `hostgroup.get`, mapping an API error to `ZapiAuthError` but letting a
+    connection error through as `ZapiError`. Token and user/password are
+    mutually exclusive, checked before any network call.
   - `ZapiProvisioner(ZapiClient)` — config-driven (`config.ini` `[zabbix]`
     section via `from_config`) provisioning: `create_host`/`update_host`/
     `create_item`/`update_item` (the group/id helpers and maintenance
