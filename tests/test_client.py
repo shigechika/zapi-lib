@@ -1234,6 +1234,14 @@ def test_a_rejected_api_token_raises_auth_error_without_echoing_it():
     assert TOKEN not in str(exc.value)
 
 
+def test_a_token_whose_role_denies_the_check_method_is_still_accepted():
+    """A role may allow only some API methods; "No permissions to call" means the token itself was accepted."""
+    err = {"code": -32500, "message": "Application error.", "data": 'No permissions to call "hostgroup.get".'}
+    with _token_check_router(lambda _: httpx.Response(200, json={"jsonrpc": "2.0", "error": err, "id": 1})):
+        c = ZapiClient("https://zabbix.example.com", api_token=TOKEN)
+    assert c._token == TOKEN
+
+
 def test_a_connection_error_during_the_token_check_is_not_reported_as_a_bad_token():
     def boom(_):
         raise httpx.ConnectError("boom")

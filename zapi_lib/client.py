@@ -199,8 +199,10 @@ class ZapiClient:
 
         Before 6.4 the token goes in the ``auth`` field like a session id; from 6.4
         it goes in the ``Authorization: Bearer`` header. The check is a
-        ``hostgroup.get`` with ``limit: 1``, which any API user may call; it returns
-        an empty list rather than an error when the user sees no groups.
+        ``hostgroup.get`` with ``limit: 1``; it returns an empty list rather than an
+        error when the user sees no groups. A user role may deny the method itself
+        ("No permissions to call ..."): Zabbix only says that after accepting the
+        token, so the token is kept. Any other API error rejects the token.
         """
         self._bearer = self._version_tuple(self.version) >= (6, 4)
         self._token = token
@@ -209,6 +211,8 @@ class ZapiClient:
         except ZapiError as e:
             if isinstance(e.__cause__, httpx.HTTPError):
                 raise  # a connection problem, not a bad token
+            if "no permissions to call" in str(e).lower():
+                return  # authenticated; the role just does not allow hostgroup.get
             # Zabbix's error text never contains the token; keep it that way.
             raise ZapiAuthError(f"API token rejected: {e}") from e
 

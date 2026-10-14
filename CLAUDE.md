@@ -55,7 +55,9 @@ no stdio/transport concerns, just an importable package.
     login: the token becomes the session token (`auth` field before 6.4,
     Bearer from 6.4) and `_use_api_token` checks it with a one-row
     `hostgroup.get`, mapping an API error to `ZapiAuthError` but letting a
-    connection error through as `ZapiError`. Token and user/password are
+    connection error through as `ZapiError`. "No permissions to call" means
+    the role denies that method after accepting the token, so the token is
+    kept. Token and user/password are
     mutually exclusive, checked before any network call.
   - `ZapiProvisioner(ZapiClient)` — config-driven (`config.ini` `[zabbix]`
     section via `from_config`) provisioning: `create_host`/`update_host`/

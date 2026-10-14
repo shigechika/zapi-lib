@@ -51,7 +51,8 @@ with ZapiClient("https://zabbix.example.com", api_token="<token>") as z:
 
 The token is sent the same way as a session token (`auth` field before 6.4,
 `Authorization: Bearer` from 6.4) and checked once with a `hostgroup.get` of one row;
-a rejected token raises `ZapiAuthError`. Give either a token or a user and password,
+a rejected token raises `ZapiAuthError`. A user role that does not allow
+`hostgroup.get` is fine: Zabbix only refuses the method after accepting the token. Give either a token or a user and password,
 not both.
 
 `set_maintenance(location, since, till, name, description)` opens an idempotent
