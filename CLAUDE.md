@@ -79,7 +79,7 @@ no stdio/transport concerns, just an importable package.
 
 ## Conventions
 
-- Python >=3.10; `X | Y` union syntax is used directly (no
+- Python >=3.11; `X | Y` union syntax is used directly (no
   `from __future__ import annotations`).
 - Single runtime dependency: `httpx`. Avoid adding another one without
   discussion — that's the reason this package exists apart from `zapi-mcp`.

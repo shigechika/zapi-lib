@@ -24,8 +24,8 @@ uv run pytest -v
 This mirrors `.github/workflows/ci.yml`: a dedicated lint job runs
 `ruff check` + `ruff format --check` (unlike some sibling repos, lint/format
 **is** enforced here — formatting nits are legitimate to flag), and a test
-job runs `pytest` across Python 3.10/3.12/3.13 on Linux plus one Windows
-3.12 job.
+job runs `pytest` across Python 3.11–3.15 on Linux plus one Windows
+job on the latest 3.x.
 
 # What to focus review on in this repo
 
