@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/shigechika/zapi-lib/compare/v0.9.0...v0.10.0) (2026-11-14)
+
+
+### Features
+
+* drop Python 3.10 (EOL) and add Python 3.15 support ([#46](https://github.com/shigechika/zapi-lib/issues/46)) ([9322099](https://github.com/shigechika/zapi-lib/commit/932209966d81a28030a87aa98c6f9d487787024f))
+
 ## [0.9.0](https://github.com/shigechika/zapi-lib/compare/v0.8.1...v0.9.0) (2026-10-14)
 
 
